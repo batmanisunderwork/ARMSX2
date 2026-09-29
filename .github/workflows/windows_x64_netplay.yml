@@ -7,6 +7,9 @@ on:
     branches: [phone-input]
   workflow_dispatch:
 
+permissions:
+  contents: write # to publish the build as a GitHub Release
+
 jobs:
   build_windows_x64:
     name: Windows x64
@@ -78,3 +81,18 @@ jobs:
             !./bin/**/*.ipdb
             !./bin/**/*.pdb
             !./bin/**/*.lib
+
+      # Release assets download much faster than workflow artifacts and give
+      # testers a stable public link.
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "netplay-test-${{ github.run_number }}"
+          Compress-Archive -Path bin\* -DestinationPath "ARMSX2-netplay-windows-x64.zip"
+          gh release create $tag "ARMSX2-netplay-windows-x64.zip" `
+            --repo ${{ github.repository }} --target ${{ github.sha }} `
+            --title "Netplay test build (Windows x64) #${{ github.run_number }}" `
+            --notes "ARMSX2 with phone controllers and the netplay prototype, for Intel/AMD Windows. Test build: not code-signed." `
+            --prerelease
