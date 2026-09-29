@@ -704,6 +704,9 @@ static std::array<const char*, static_cast<u32>(InputSourceType::Count)> s_input
 	"Keyboard",
 	"Mouse",
 	"SDL",
+#ifndef _WIN32
+	"Phone",
+#endif
 #ifdef _WIN32
 	"DInput",
 	"XInput",
@@ -728,6 +731,11 @@ bool InputManager::GetInputSourceDefaultEnabled(InputSourceType type)
 		case InputSourceType::Pointer:
 		case InputSourceType::SDL:
 			return true;
+
+#ifndef _WIN32
+		case InputSourceType::Phone:
+			return true;
+#endif
 
 #ifdef _WIN32
 		case InputSourceType::DInput:
@@ -1872,6 +1880,10 @@ void InputManager::UpdateInputSourceState(SettingsInterface& si, std::unique_loc
 
 #include "Input/SDLInputSource.h"
 
+#ifndef _WIN32
+#include "Input/PhoneInputSource.h"
+#endif
+
 #ifdef _WIN32
 #include "Input/DInputSource.h"
 #include "Input/XInputSource.h"
@@ -1880,6 +1892,9 @@ void InputManager::UpdateInputSourceState(SettingsInterface& si, std::unique_loc
 void InputManager::ReloadSources(SettingsInterface& si, std::unique_lock<std::mutex>& settings_lock)
 {
 	UpdateInputSourceState<SDLInputSource>(si, settings_lock, InputSourceType::SDL);
+#ifndef _WIN32
+	UpdateInputSourceState<PhoneInputSource>(si, settings_lock, InputSourceType::Phone);
+#endif
 #ifdef _WIN32
 	UpdateInputSourceState<DInputSource>(si, settings_lock, InputSourceType::DInput);
 	UpdateInputSourceState<XInputSource>(si, settings_lock, InputSourceType::XInput);

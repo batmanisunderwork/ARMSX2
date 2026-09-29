@@ -1,0 +1,80 @@
+name: Windows x64 build (phone input + netplay)
+# Builds ARMSX2 for Intel/AMD Windows, mirroring windows_build_qt.yml (arm64)
+# but with the x64 toolchain (vcvars64) and x64 dependencies
+# (build-dependencies.bat -> deps/).
+on:
+  push:
+    branches: [phone-input]
+  workflow_dispatch:
+
+jobs:
+  build_windows_x64:
+    name: Windows x64
+    runs-on: windows-2025
+    # Qt and the other dependencies take a long time on a cold cache.
+    timeout-minutes: 240
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: 1
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Locate x64 vcvars
+        shell: cmd
+        run: |
+            for /f "usebackq tokens=*" %%i in (`call vswhere -latest -property installationPath`) do set "VSINSTPATH=%%i"
+            echo VCVARSPATH=%VSINSTPATH%\VC\Auxiliary\Build\vcvars64.bat>>%GITHUB_ENV%
+
+      - name: Download patches
+        shell: cmd
+        run: |
+          cd bin/resources
+          curl -L -o patches.zip "https://github.com/isztldav/pcsx2_patches/releases/download/latest/patches.zip"
+
+      - name: Cache Dependencies
+        id: cache-deps
+        uses: actions/cache@v6
+        with:
+          path: deps
+          key: windows-2025 x64 deps ${{ hashFiles('.github/workflows/scripts/windows/build-dependencies.bat', '.github/workflows/scripts/windows/*.patch', '.github/workflows/scripts/common/*.patch') }}
+
+      - name: Build x64 Dependencies
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        env:
+          DEBUG: 0
+        run: .github/workflows/scripts/windows/build-dependencies.bat
+
+      - name: Generate CMake
+        shell: cmd
+        run: |
+          call "%VCVARSPATH%" || exit /b
+          cmake . -B build ^
+            "-DCMAKE_PREFIX_PATH=%cd%\deps" ^
+            -DQT_BUILD=ON ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF ^
+            -G Ninja || exit /b
+
+      - name: Build ARMSX2
+        shell: cmd
+        run: |
+          call "%VCVARSPATH%" || exit /b
+          cmake --build build --config Release || exit /b
+          cmake --install build --config Release || exit /b
+          REM We can use Segoe UI Emoji so we don't need to bundle this
+          del bin\resources\fonts\Twemoji*
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ARMSX2-netplay-windows-x64
+          path: |
+            ./bin
+            !./bin/**/*.bsc
+            !./bin/**/*.exp
+            !./bin/**/*.ilk
+            !./bin/**/*.iobj
+            !./bin/**/*.ipdb
+            !./bin/**/*.pdb
+            !./bin/**/*.lib

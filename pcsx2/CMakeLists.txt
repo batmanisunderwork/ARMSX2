@@ -866,6 +866,9 @@ set(pcsx2ImGuiHeaders
 	ImGui/ImGuiOverlays.h
 )
 
+list(APPEND pcsx2Sources DeterminismTest.cpp Netplay.cpp)
+list(APPEND pcsx2Headers DeterminismTest.h Netplay.h)
+
 set(pcsx2InputSources
 	Input/InputManager.cpp
 	Input/InputSource.cpp
@@ -897,6 +900,14 @@ if(WIN32)
 	# RAIntegration is only supported on Windows.
 	target_compile_definitions(PCSX2_FLAGS INTERFACE ENABLE_RAINTEGRATION)
 	target_link_libraries(PCSX2_FLAGS INTERFACE rainterface)
+endif()
+if(NOT WIN32)
+	list(APPEND pcsx2InputSources
+		Input/PhoneInputSource.cpp
+	)
+	list(APPEND pcsx2InputHeaders
+		Input/PhoneInputSource.h
+	)
 endif()
 if(WIN32)
 	list(APPEND pcsx2InputSources

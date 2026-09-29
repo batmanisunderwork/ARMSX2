@@ -40,6 +40,8 @@
 #include "SupportURLs.h"
 #include "USB/USB.h"
 #include "Vif_Dynarec.h"
+#include "DeterminismTest.h"
+#include "Netplay.h"
 #include "VMManager.h"
 #include "ps2/BiosTools.h"
 
@@ -2978,6 +2980,9 @@ void VMManager::Internal::EntryPointCompilingOnCPUThread()
 
 void VMManager::Internal::VSyncOnCPUThread()
 {
+	DeterminismTest::OnVSync();
+	Netplay::OnVSync();
+
 	Pad::UpdateMacroButtons();
 
 	Patch::ApplyVsyncPatches();

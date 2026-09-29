@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Host.h"
+#include "Netplay.h"
 #include "Input/InputManager.h"
 #include "SIO/Pad/Pad.h"
 #include "SIO/Pad/PadDualshock2.h"
@@ -545,6 +546,10 @@ PadBase* Pad::GetPad(const u8 unifiedSlot)
 void Pad::SetControllerState(u32 controller, u32 bind, float value)
 {
 	if (controller >= NUM_CONTROLLER_PORTS)
+		return;
+
+	// During netplay, local input is applied in lockstep at vsync instead.
+	if (Netplay::CaptureLocalInput(controller, bind, value))
 		return;
 
 	// Input can arrive before the pads are constructed (no VM yet) — e.g. the Android

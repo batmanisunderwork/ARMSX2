@@ -255,5 +255,11 @@
 	<key>CFBundleLocalizations</key>
 	<array>${PCSX2_MACOS_LOCALIZATIONS}
 	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>ARMSX2 listens for phone controllers (the Virtual Gamepad app) on your Wi-Fi.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_vgamepad._udp</string>
+	</array>
 </dict>
 </plist>

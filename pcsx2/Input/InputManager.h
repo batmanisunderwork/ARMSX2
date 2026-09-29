@@ -24,6 +24,9 @@ enum class InputSourceType : u32
 	Keyboard,
 	Pointer,
 	SDL,
+#ifndef _WIN32
+	Phone,
+#endif
 #ifdef _WIN32
 	DInput,
 	XInput,
