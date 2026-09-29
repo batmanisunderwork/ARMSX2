@@ -90,6 +90,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "netplay-test-${{ github.run_number }}"
+          # Leave out debug symbols and build leftovers, like the artifact does.
+          Get-ChildItem bin -Recurse -Include *.bsc,*.exp,*.ilk,*.iobj,*.ipdb,*.pdb,*.lib | Remove-Item
           Compress-Archive -Path bin\* -DestinationPath "ARMSX2-netplay-windows-x64.zip"
           gh release create $tag "ARMSX2-netplay-windows-x64.zip" `
             --repo ${{ github.repository }} --target ${{ github.sha }} `
