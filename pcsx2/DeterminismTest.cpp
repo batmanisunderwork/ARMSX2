@@ -3,10 +3,12 @@
 
 #include "DeterminismTest.h"
 
+#include "Host.h"
 #include "IopMem.h"
 #include "Memory.h"
 #include "SIO/Pad/Pad.h"
 #include "SIO/Pad/PadDualshock2.h"
+#include "VMManager.h"
 #include "VUmicro.h"
 
 #define XXH_STATIC_LINKING_ONLY 1
@@ -15,6 +17,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 namespace DeterminismTest
 {
@@ -25,6 +28,8 @@ namespace DeterminismTest
 	static u32 s_seed = 1;
 	static u64 s_dump_frame = ~0ull;
 	static const char* s_dump_path = nullptr;
+	static u64 s_save_frame = ~0ull;
+	static std::string s_save_path;
 
 	/// Deterministic pseudo-random number for (seed, n).
 	static u32 Mix(u32 n)
@@ -79,6 +84,16 @@ namespace DeterminismTest
 			if (const char* dump = std::getenv("ARMSX2_DETERMINISM_DUMP_FRAME"))
 				s_dump_frame = std::strtoull(dump, nullptr, 10);
 			s_dump_path = std::getenv("ARMSX2_DETERMINISM_DUMP_PATH");
+			// Optional save state at one frame (queued work runs later in this
+			// same vsync), and the frame number to count from for a run that
+			// was started from such a state (-statefile): the save frame + 1.
+			if (const char* v = std::getenv("ARMSX2_DETERMINISM_SAVE_FRAME"))
+				s_save_frame = std::strtoull(v, nullptr, 10);
+			if (const char* v = std::getenv("ARMSX2_DETERMINISM_SAVE_PATH"))
+				s_save_path = v;
+			if (const char* v = std::getenv("ARMSX2_DETERMINISM_FIRST_FRAME"))
+				s_frame = std::strtoull(v, nullptr, 10);
+			s_frames_to_run += s_frame;
 			if (s_log)
 				std::fprintf(s_log, "# frame ee iop vu0 vu1 seed=%u\n", s_seed);
 		}
@@ -105,6 +120,17 @@ namespace DeterminismTest
 
 		// Input for the next frame is set at the same emulated moment every run.
 		ApplyScriptedInput(s_frame);
+
+		if (s_frame == s_save_frame && !s_save_path.empty())
+		{
+			Host::RunOnCPUThread([path = s_save_path]() {
+				VMManager::SaveState(path.c_str(), false, false, [](const std::string& error) {
+					if (s_log)
+						std::fprintf(s_log, "# save state failed: %s
+", error.c_str());
+				});
+			});
+		}
 
 		if (++s_frame >= s_frames_to_run)
 		{
