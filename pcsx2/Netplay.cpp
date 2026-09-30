@@ -111,7 +111,7 @@ namespace Netplay
 	/// Save-state transfer: chunks small enough for one UDP packet on any
 	/// path (with the relay header), and how many may be in flight.
 	static constexpr u32 STATE_CHUNK_SIZE = 1200;
-	static constexpr u32 STATE_WINDOW = 256;
+	static constexpr u32 STATE_WINDOW = 512;
 	static constexpr u32 MAX_STATE_SIZE = 128 * 1024 * 1024;
 
 #pragma pack(push, 1)
@@ -270,7 +270,8 @@ namespace Netplay
 	/// When the current 60-frame stretch began, to spot real slowdowns.
 	static Clock::time_point s_second_start;
 	/// Frame of the last delay rise: the slowdown that caused it isn't jitter.
-	static s64 s_last_rise_frame = -1000;
+	/// 0 also ignores the first 2 s, which include the start-up (and any load).
+	static s64 s_last_rise_frame = 0;
 
 	// Round-trip time. Packets are only read once per frame, so a sample can
 	// include up to a frame of waiting in our socket; the minimum over the last
@@ -538,6 +539,10 @@ namespace Netplay
 			Log("error: can't bind UDP port %u", port);
 			return;
 		}
+		// Room for a burst of save-state chunks (the default can be 64 KB).
+		const int buffer_size = 4 * 1024 * 1024;
+		setsockopt(s_socket, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&buffer_size), sizeof(buffer_size));
+		setsockopt(s_socket, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&buffer_size), sizeof(buffer_size));
 #ifdef _WIN32
 		u_long nonblocking = 1;
 		ioctlsocket(s_socket, FIONBIO, &nonblocking);
@@ -1512,7 +1517,7 @@ namespace Netplay
 		while (!s_state_complete)
 		{
 			const Clock::time_point now = Clock::now();
-			const auto resend_after = std::chrono::milliseconds(std::max(30, static_cast<int>(RoundTripMs() * 2 + 10)));
+			const auto resend_after = std::chrono::milliseconds(std::max(20, static_cast<int>(RoundTripMs() * 1.5 + 5)));
 			while (base < s_state_chunks && s_state_have[base])
 				base++;
 			for (u32 i = base; i < std::min(base + STATE_WINDOW, s_state_chunks); i++)
