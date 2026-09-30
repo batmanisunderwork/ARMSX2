@@ -196,6 +196,8 @@ namespace Netplay
 	/// Host: a delay raised because of stalls is kept at least until this frame.
 	static u32 s_stall_floor = 0;
 	static s64 s_stall_floor_until = -1;
+	/// When the current 60-frame stretch began, to spot real slowdowns.
+	static Clock::time_point s_second_start;
 
 	// Round-trip time. Packets are only read once per frame, so a sample can
 	// include up to a frame of waiting in our socket; the minimum over the last
@@ -633,14 +635,26 @@ namespace Netplay
 		return rtt == NO_SAMPLE ? s_srtt_ms : rtt;
 	}
 
+	/// Length of one emulated frame (NTSC 16.7 ms, PAL 20 ms).
+	static double FrameMs()
+	{
+		const float hz = VMManager::GetFrameRate();
+		return hz > 1.0f ? 1000.0 / hz : FRAME_MS;
+	}
+
 	/// Delay that covers the one-way latency plus a little slack for frame
 	/// pacing. Matches the Mac measurements: 40 ms one way -> 3 frames,
-	/// 80 ms -> 6. Jitter is handled by AdaptDelay() watching for stalls.
+	/// 80 ms -> 6. Jitter is handled by AdaptDelay() watching for slowdowns.
+	static u32 DelayForRtt(double rtt_ms)
+	{
+		const double needed_ms = rtt_ms / 2 + 4.0;
+		const u32 frames = static_cast<u32>(std::ceil(needed_ms / FrameMs()));
+		return std::clamp(frames, s_min_delay, s_max_delay);
+	}
+
 	static u32 DelayForRtt()
 	{
-		const double needed_ms = RoundTripMs() / 2 + 4.0;
-		const u32 frames = static_cast<u32>(std::ceil(needed_ms / FRAME_MS));
-		return std::clamp(frames, s_min_delay, s_max_delay);
+		return DelayForRtt(RoundTripMs());
 	}
 
 	static void SetDelay(u32 delay, const char* reason)
@@ -652,40 +666,41 @@ namespace Netplay
 		s_delay = delay;
 	}
 
-	/// Host, once per second: follow the round-trip time. Raise at once, lower
-	/// one frame at a time after 3 calm seconds, so a brief spike doesn't make
-	/// the delay jump around.
-	static void AdaptDelay()
+	/// Host, once per second (`second_ms` = how long the last 60 frames took):
+	/// follow the round-trip time. Rises are judged on the last second alone,
+	/// so they happen at once; falls on the minimum of the last 3 seconds and
+	/// only after 3 calm seconds, then one frame per second, so a brief dip
+	/// doesn't make the delay jump around.
+	static void AdaptDelay(double second_ms)
 	{
 		if (!s_is_host || s_fixed_delay || s_rtt_samples == 0)
 			return;
 
-		const u32 by_rtt = DelayForRtt();
-		u32 target = by_rtt;
+		const u32 up = DelayForRtt(s_rtt_min_ms[0] == NO_SAMPLE ? RoundTripMs() : s_rtt_min_ms[0]);
+		const u32 down = DelayForRtt();
 
-		// Frames stall although the delay covers the round trip: jitter or
-		// uneven frame pacing. Allow up to 2 frames extra, and keep that for
-		// 10 seconds before trusting the round-trip time again.
-		if (s_stalled_frames > 6 && s_delay >= by_rtt && s_delay < std::min(by_rtt + 2, s_max_delay))
+		// The game really slowed down although the delay covers the round
+		// trip: jitter or uneven frame pacing. Lockstep slows both peers alike,
+		// so the host sees it for both. Allow up to 2 frames extra, and keep
+		// that for 10 seconds before trusting the round-trip time again. (A PC
+		// too slow for the game also lands here; the cap keeps that harmless.)
+		const bool slowed = second_ms > 60 * FrameMs() * 1.03;
+		if (slowed && s_delay >= up && s_delay < std::min(up + 2, s_max_delay))
 		{
 			s_stall_floor = s_delay + 1;
 			s_stall_floor_until = s_frame + 600;
 		}
-		if (s_frame < s_stall_floor_until)
-			target = std::max(target, s_stall_floor);
+		const u32 stall_floor = s_frame < s_stall_floor_until ? s_stall_floor : 0;
 
-		if (target > s_delay)
+		if (std::max(up, stall_floor) > s_delay)
 		{
 			s_lower_streak = 0;
-			SetDelay(target, target > by_rtt ? "frames stalling" : "latency rose");
+			SetDelay(std::max(up, stall_floor), stall_floor > up ? "game slowed down" : "latency rose");
 		}
-		else if (target < s_delay)
+		else if (std::max(down, stall_floor) < s_delay)
 		{
 			if (++s_lower_streak >= 3)
-			{
-				s_lower_streak = 0;
 				SetDelay(s_delay - 1, "latency fell");
-			}
 		}
 		else
 		{
@@ -1030,6 +1045,7 @@ namespace Netplay
 
 		s_session_started = true;
 		s_delay = s_start_delay;
+		s_second_start = Clock::now();
 		s_last_recorded = static_cast<s64>(s_start_delay) - 1;
 		Log("session started: delay %u frames (%.0f ms), rtt %.1f ms (min %.1f ms)", s_start_delay,
 			s_start_delay * FRAME_MS, s_srtt_ms, RoundTripMs());
@@ -1083,23 +1099,7 @@ namespace Netplay
 			}
 		}
 
-		// 1. Record our input for every frame up to f + delay not yet recorded.
-		// After the delay drops, this records nothing until f + delay passes
-		// the newest recorded frame.
-		const s64 target = f + s_delay;
-		for (s64 x = s_last_recorded + 1; x <= target; x++)
-		{
-			Input local;
-			if (s_scripted)
-				local = ScriptedInput(x);
-			else
-				for (u32 i = 0; i < NUM_INPUTS; i++)
-					local[i] = s_live[i].load(std::memory_order_relaxed);
-			s_local[x % HISTORY] = {x, local};
-		}
-		s_last_recorded = std::max(s_last_recorded, target);
-
-		// 2. Fingerprint the state this frame produced, for desync checks.
+		// 1. Fingerprint the state this frame produced, for desync checks.
 		if (f % HASH_INTERVAL == 0)
 		{
 			s_last_hash_frame = f;
@@ -1108,8 +1108,11 @@ namespace Netplay
 			CompareHashes(f);
 		}
 
-		// 3. Send, then wait for the peer's input for this frame.
-		SendInput();
+		// 2. Wait for the peer's input for this frame. The peer that runs
+		// ahead waits here each frame; waiting before reading our own pad (step
+		// 3) means that wait doesn't add to our input lag. It can't deadlock:
+		// the peer recorded frame f by its frame f - 1, which only needed our
+		// input up to f - 1, recorded at our frame f - 2 or earlier.
 		const Clock::time_point start = Clock::now();
 		Clock::time_point last_send = start;
 		bool warned = false;
@@ -1144,6 +1147,23 @@ namespace Netplay
 		if (waited_ms > 1.0)
 			s_stalled_frames++;
 
+		// 3. Record our input for every frame up to f + delay not yet recorded,
+		// and send it. After the delay drops, this records nothing until
+		// f + delay passes the newest recorded frame.
+		const s64 target = f + s_delay;
+		for (s64 x = s_last_recorded + 1; x <= target; x++)
+		{
+			Input local;
+			if (s_scripted)
+				local = ScriptedInput(x);
+			else
+				for (u32 i = 0; i < NUM_INPUTS; i++)
+					local[i] = s_live[i].load(std::memory_order_relaxed);
+			s_local[x % HISTORY] = {x, local};
+		}
+		s_last_recorded = std::max(s_last_recorded, target);
+		SendInput();
+
 		// 4. Both machines apply the same inputs: host on port 1, guest on port 2.
 		const Input& ours = InputFor(s_local, f);
 		const Input& theirs = InputFor(s_remote, f);
@@ -1152,11 +1172,14 @@ namespace Netplay
 
 		if (f > 0 && f % 60 == 0)
 		{
-			Log("frame %lld: delay %u, rtt %.1f ms, wait avg %.2f ms max %.1f ms, %u/60 frames stalled >1ms, "
-				"sent %u recv %u, hash checks ok %u, desyncs %u, state %016llx",
-				static_cast<long long>(f), s_delay, s_srtt_ms, s_wait_total_ms / 60.0, s_wait_max_ms, s_stalled_frames,
-				s_sent, s_received, s_hash_ok, s_desyncs, static_cast<unsigned long long>(s_last_hash));
-			AdaptDelay();
+			const Clock::time_point now = Clock::now();
+			const double second_ms = std::chrono::duration<double, std::milli>(now - s_second_start).count();
+			s_second_start = now;
+			Log("frame %lld: delay %u, rtt %.1f ms, 60 frames took %.0f ms, wait avg %.2f ms max %.1f ms, "
+				"%u/60 frames stalled >1ms, sent %u recv %u, hash checks ok %u, desyncs %u, state %016llx",
+				static_cast<long long>(f), s_delay, s_srtt_ms, second_ms, s_wait_total_ms / 60.0, s_wait_max_ms,
+				s_stalled_frames, s_sent, s_received, s_hash_ok, s_desyncs, static_cast<unsigned long long>(s_last_hash));
+			AdaptDelay(second_ms);
 			RotateRttWindow();
 			s_wait_total_ms = s_wait_max_ms = 0;
 			s_stalled_frames = s_sent = s_received = 0;
