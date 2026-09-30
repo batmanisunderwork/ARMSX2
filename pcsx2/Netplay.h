@@ -13,15 +13,26 @@
 /// port 1 and the guest port 2, on both machines, so both emulate identically.
 /// Every 60 frames both hash the machine state and compare to detect desyncs.
 ///
+/// Before frame 0 the peers shake hands: each checks that the other runs the
+/// same build and architecture, game, BIOS, memory cards and emulation
+/// settings (and exits with a list of the differences otherwise), then the
+/// host measures the round-trip time and picks the starting delay. During play
+/// the host keeps adapting the delay to the round-trip time and to stalls, and
+/// the guest follows it.
+///
 /// Inactive unless ARMSX2_NETPLAY is set. Environment:
-///   ARMSX2_NETPLAY        "host" or "join"
-///   ARMSX2_NETPLAY_PORT   local UDP port (default 7777 host / 7778 join)
-///   ARMSX2_NETPLAY_PEER   peer address "ip:port"
-///   ARMSX2_NETPLAY_DELAY  input delay in frames (default 3)
-///   ARMSX2_NETPLAY_LOG    log file (per-second stats, desync checks)
-///   ARMSX2_NETPLAY_SCRIPT seed: play scripted input instead of the real pad
-///   ARMSX2_NETPLAY_FRAMES exit after this many frames (for automated tests)
-///   ARMSX2_NETPLAY_LOSS   simulated outgoing packet loss, percent
+///   ARMSX2_NETPLAY           "host" or "join"
+///   ARMSX2_NETPLAY_PORT      local UDP port (default 7777 host / 7778 join)
+///   ARMSX2_NETPLAY_PEER      peer address "ip:port"
+///   ARMSX2_NETPLAY_DELAY     host: fixed input delay in frames; unset or
+///                            "auto" adapts it to the connection
+///   ARMSX2_NETPLAY_MIN_DELAY host: adaptive delay range (default 2..15)
+///   ARMSX2_NETPLAY_MAX_DELAY
+///   ARMSX2_NETPLAY_LOG       log file (per-second stats, desync checks)
+///   ARMSX2_NETPLAY_SCRIPT    seed: play scripted input instead of the real pad
+///   ARMSX2_NETPLAY_FRAMES    exit after this many frames (for automated tests)
+///   ARMSX2_NETPLAY_LOSS      simulated outgoing packet loss, percent
+///   ARMSX2_NETPLAY_LATENCY   simulated one-way latency, ms
 namespace Netplay
 {
 	/// Called at every vsync on the CPU thread. Blocks until the peer's input
