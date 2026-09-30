@@ -524,7 +524,17 @@ namespace Netplay
 			cards.Add(c.Mcd[slot].Enabled).Add(c.Mcd[slot].Type);
 			if (!c.Mcd[slot].Enabled || c.Mcd[slot].Type != MemoryCardType::File)
 				continue;
-			const std::optional<std::vector<u8>> data = FileSystem::ReadBinaryFile(c.FullpathToMcd(slot).c_str());
+			// The emulator has the card open for writing; a plain open would
+			// fail on Windows, so allow sharing.
+			const std::string path = c.FullpathToMcd(slot);
+			std::optional<std::vector<u8>> data;
+			if (FileSystem::ManagedCFilePtr fp = FileSystem::OpenManagedSharedCFile(
+					path.c_str(), "rb", FileSystem::FileShareMode::DenyNone))
+			{
+				data = FileSystem::ReadBinaryFile(fp.get());
+			}
+			if (!data.has_value())
+				Log("warning: can't read memory card %s; it won't be compared", path.c_str());
 			cards.Add(data.has_value() ? XXH3_64bits(data->data(), data->size()) : u64{0});
 		}
 		info.memcards = cards.Hash();
@@ -963,6 +973,10 @@ namespace Netplay
 	static bool Handshake()
 	{
 		ComputeSessionInfo();
+		Log("this machine: build %.12s %s, game %s %08X, bios %016llx, cpu %016llx, hacks %016llx, memcards %016llx",
+			s_info.build, s_info.arch, s_info.serial, s_info.disc_crc, static_cast<unsigned long long>(s_info.bios),
+			static_cast<unsigned long long>(s_info.cpu), static_cast<unsigned long long>(s_info.hacks),
+			static_cast<unsigned long long>(s_info.memcards));
 		if (const std::vector<std::string> problems = LocalProblems(); !problems.empty())
 			FailSession(problems);
 
