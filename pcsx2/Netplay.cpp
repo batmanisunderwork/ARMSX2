@@ -24,6 +24,9 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <mstcpip.h>
+#ifndef SIO_UDP_CONNRESET // hidden by some _WIN32_WINNT settings
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
 using socket_t = SOCKET;
 static constexpr socket_t BAD_SOCKET = INVALID_SOCKET;
 #define poll WSAPoll
