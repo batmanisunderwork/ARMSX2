@@ -5,15 +5,19 @@
 
 #include "BuildVersion.h"
 #include "Config.h"
+#include "Host.h"
 #include "IopMem.h"
 #include "Memory.h"
 #include "SIO/Pad/Pad.h"
 #include "SIO/Pad/PadDualshock2.h"
+#include "SaveState.h"
 #include "VMManager.h"
 #include "VUmicro.h"
 
 #include "common/Console.h"
+#include "common/Error.h"
 #include "common/FileSystem.h"
+#include "common/Path.h"
 
 #define XXH_STATIC_LINKING_ONLY 1
 #define XXH_INLINE_ALL 1
@@ -73,7 +77,7 @@ namespace Netplay
 	static constexpr u32 HASH_HISTORY = 64;
 	static constexpr u32 MAGIC = 0x4E505332; // "NPS2"
 	/// Bump whenever the wire format or the lockstep rules change.
-	static constexpr u8 PROTOCOL_VERSION = 2;
+	static constexpr u8 PROTOCOL_VERSION = 3;
 	static constexpr u32 MAX_DELAY = 30;
 	static constexpr double FRAME_MS = 1000.0 / 59.94;
 	/// Round-trip samples the host takes during the handshake before it picks
@@ -100,7 +104,15 @@ namespace Netplay
 	{
 		PACKET_HELLO = 1,
 		PACKET_INPUT = 2,
+		PACKET_STATE_CHUNK = 3,
+		PACKET_STATE_ACK = 4,
 	};
+
+	/// Save-state transfer: chunks small enough for one UDP packet on any
+	/// path (with the relay header), and how many may be in flight.
+	static constexpr u32 STATE_CHUNK_SIZE = 1200;
+	static constexpr u32 STATE_WINDOW = 256;
+	static constexpr u32 MAX_STATE_SIZE = 128 * 1024 * 1024;
 
 #pragma pack(push, 1)
 	// Wire format. Every supported host is little-endian, and the handshake
@@ -145,7 +157,11 @@ namespace Netplay
 		/// Host: `delay` is the chosen starting delay. Guest: it accepted it.
 		u8 ready;
 		u8 delay;
-		u8 reserved;
+		/// Host: bit 0 = both players start from the host's save state, which
+		/// is `state_size` bytes with XXH3 `state_hash`.
+		u8 flags;
+		u32 state_size;
+		u64 state_hash;
 		SessionInfo info;
 	};
 
@@ -161,9 +177,31 @@ namespace Netplay
 		u64 hash;
 		Input inputs[REDUNDANCY]; // oldest first
 	};
+
+	struct StateChunkPacket
+	{
+		Header header;
+		u32 index;
+		u16 size;
+		u16 reserved;
+		u8 data[STATE_CHUNK_SIZE];
+	};
+
+	struct StateAckPacket
+	{
+		Header header;
+		/// All chunks before this one have arrived...
+		u32 next_needed;
+		/// ...plus these after it (bit i = chunk next_needed + 1 + i).
+		u64 received[STATE_WINDOW / 64];
+		/// The whole state arrived and its hash matched.
+		u8 done;
+		u8 reserved[3];
+	};
 #pragma pack(pop)
 
-	static constexpr size_t MAX_PACKET_SIZE = std::max(sizeof(HelloPacket), sizeof(InputPacket));
+	static constexpr size_t MAX_PACKET_SIZE =
+		std::max({sizeof(HelloPacket), sizeof(InputPacket), sizeof(StateChunkPacket), sizeof(StateAckPacket)});
 	using PacketBuffer = std::array<u8, MAX_PACKET_SIZE>;
 
 	static std::once_flag s_init_once;
@@ -256,6 +294,27 @@ namespace Netplay
 	static u32 s_host_delay = 0; // guest: the host's starting delay
 	static bool s_peer_sent_input = false;
 
+	// Starting from a save state (ARMSX2_NETPLAY_STATE on the host): after the
+	// handshake the host sends the state file, then both load it at the same
+	// vsync (the host too: a loaded state isn't bit-identical to the game that
+	// saved it, but two loads of one state are) and lockstep starts from there.
+	enum class StatePhase : u8
+	{
+		None, // start from power-on
+		Transfer, // send / receive the state at the next vsync
+		Done,
+	};
+	static StatePhase s_state_phase = StatePhase::None;
+	static std::string s_state_path; // host: the file; guest: where it's written
+	static std::vector<u8> s_state_data;
+	static u32 s_state_size = 0;
+	static u64 s_state_hash = 0;
+	static u32 s_state_chunks = 0;
+	static std::vector<bool> s_state_have; // guest: received / host: acked
+	static u32 s_state_have_count = 0;
+	static bool s_state_complete = false; // guest: all chunks in and hash OK / host: guest said so
+	static Clock::time_point s_state_last_ack;
+
 	/// Latest local controller state, written by input handlers (possibly on
 	/// another thread) and sampled once per frame.
 	static std::array<std::atomic<u8>, NUM_INPUTS> s_live = {};
@@ -305,7 +364,7 @@ namespace Netplay
 				break;
 			case Route::Relay:
 			{
-				std::array<u8, 512> buffer;
+				std::array<u8, RELAY_HEADER_SIZE + MAX_PACKET_SIZE> buffer;
 				if (RELAY_HEADER_SIZE + size > buffer.size())
 					break;
 				std::memcpy(buffer.data(), "NPR1", 4);
@@ -410,6 +469,13 @@ namespace Netplay
 			s_loss_percent = std::min<u32>(static_cast<u32>(std::strtoul(v, nullptr, 10)), 90);
 		if (const char* v = std::getenv("ARMSX2_NETPLAY_LATENCY"))
 			s_latency_ms = std::min<u32>(static_cast<u32>(std::strtoul(v, nullptr, 10)), 1000);
+		if (const char* v = std::getenv("ARMSX2_NETPLAY_STATE"); v && *v)
+		{
+			if (s_is_host)
+				s_state_path = v;
+			else
+				Log("note: ARMSX2_NETPLAY_STATE is ignored for the guest; the host's state is used");
+		}
 		if (const char* v = std::getenv("ARMSX2_NETPLAY_LATENCY_PLAN"))
 		{
 			for (const char* p = v; *p;)
@@ -920,6 +986,12 @@ namespace Netplay
 		packet.is_host = s_is_host;
 		packet.ready = s_is_host ? s_host_ready : s_session_started;
 		packet.delay = static_cast<u8>(s_is_host ? s_start_delay : s_host_delay);
+		if (s_is_host && !s_state_path.empty())
+		{
+			packet.flags = 1;
+			packet.state_size = s_state_size;
+			packet.state_hash = s_state_hash;
+		}
 		packet.info = s_info;
 		SendPacket(&packet, sizeof(packet));
 	}
@@ -1021,6 +1093,14 @@ namespace Netplay
 			{
 				s_host_ready = true;
 				s_host_delay = std::clamp<u32>(packet.delay, 1, MAX_DELAY);
+				if (packet.flags & 1)
+				{
+					if (packet.state_size == 0 || packet.state_size > MAX_STATE_SIZE)
+						FailSession({"the host's save state is too large"});
+					s_state_size = packet.state_size;
+					s_state_hash = packet.state_hash;
+					s_state_phase = StatePhase::Transfer;
+				}
 			}
 		}
 	}
@@ -1058,6 +1138,76 @@ namespace Netplay
 			{
 				slot = {packet.hash_frame, packet.hash};
 				CompareHashes(packet.hash_frame);
+			}
+		}
+	}
+
+	// ------------------------------------------------------------------------
+	// Save-state transfer packets
+	// ------------------------------------------------------------------------
+
+	/// Guest: tells the host which chunks have arrived.
+	static void SendStateAck()
+	{
+		StateAckPacket ack = {};
+		FillHeader(ack.header, PACKET_STATE_ACK);
+		u32 next = 0;
+		while (next < s_state_chunks && s_state_have[next])
+			next++;
+		ack.next_needed = next;
+		for (u32 i = 0; i < STATE_WINDOW; i++)
+		{
+			const u32 chunk = next + 1 + i;
+			if (chunk < s_state_chunks && s_state_have[chunk])
+				ack.received[i / 64] |= u64{1} << (i % 64);
+		}
+		ack.done = s_state_complete;
+		SendPacket(&ack, sizeof(ack));
+		s_state_last_ack = Clock::now();
+	}
+
+	static void OnStateChunk(const StateChunkPacket& packet)
+	{
+		if (s_is_host || s_state_chunks == 0)
+			return;
+		if (s_state_complete)
+		{
+			SendStateAck(); // the host missed our "done"
+			return;
+		}
+		const u64 offset = u64{packet.index} * STATE_CHUNK_SIZE;
+		if (packet.index >= s_state_chunks || packet.size > STATE_CHUNK_SIZE ||
+			offset + packet.size != std::min<u64>(offset + STATE_CHUNK_SIZE, s_state_size))
+			return;
+		if (!s_state_have[packet.index])
+		{
+			std::memcpy(s_state_data.data() + offset, packet.data, packet.size);
+			s_state_have[packet.index] = true;
+			s_state_have_count++;
+		}
+	}
+
+	static void OnStateAck(const StateAckPacket& packet)
+	{
+		if (!s_is_host || s_state_chunks == 0)
+			return;
+		if (packet.done)
+			s_state_complete = true;
+		for (u32 i = 0; i < std::min(packet.next_needed, s_state_chunks); i++)
+		{
+			if (!s_state_have[i])
+			{
+				s_state_have[i] = true;
+				s_state_have_count++;
+			}
+		}
+		for (u32 i = 0; i < STATE_WINDOW; i++)
+		{
+			const u32 chunk = packet.next_needed + 1 + i;
+			if (chunk < s_state_chunks && (packet.received[i / 64] >> (i % 64) & 1) && !s_state_have[chunk])
+			{
+				s_state_have[chunk] = true;
+				s_state_have_count++;
 			}
 		}
 	}
@@ -1229,6 +1379,18 @@ namespace Netplay
 				std::memcpy(&packet, buffer.data(), sizeof(packet));
 				OnInput(packet);
 			}
+			else if (header.type == PACKET_STATE_CHUNK && len == static_cast<int>(sizeof(StateChunkPacket)))
+			{
+				StateChunkPacket packet;
+				std::memcpy(&packet, buffer.data(), sizeof(packet));
+				OnStateChunk(packet);
+			}
+			else if (header.type == PACKET_STATE_ACK && len == static_cast<int>(sizeof(StateAckPacket)))
+			{
+				StateAckPacket packet;
+				std::memcpy(&packet, buffer.data(), sizeof(packet));
+				OnStateAck(packet);
+			}
 		}
 	}
 
@@ -1249,6 +1411,18 @@ namespace Netplay
 			static_cast<unsigned long long>(s_info.memcards));
 		if (const std::vector<std::string> problems = LocalProblems(); !problems.empty())
 			FailSession(problems);
+
+		if (!s_state_path.empty())
+		{
+			std::optional<std::vector<u8>> data = FileSystem::ReadBinaryFile(s_state_path.c_str());
+			if (!data.has_value() || data->empty() || data->size() > MAX_STATE_SIZE)
+				FailSession({"can't read the save state " + s_state_path});
+			s_state_data = std::move(*data);
+			s_state_size = static_cast<u32>(s_state_data.size());
+			s_state_hash = XXH3_64bits(s_state_data.data(), s_state_data.size());
+			s_state_phase = StatePhase::Transfer;
+			Log("starting from save state %s (%u KB)", s_state_path.c_str(), s_state_size / 1024);
+		}
 
 		Log("waiting for the other player...");
 		Clock::time_point last_hello = {};
@@ -1323,6 +1497,150 @@ namespace Netplay
 	}
 
 	// ------------------------------------------------------------------------
+	// Save-state transfer (runs at the vsync after the handshake)
+	// ------------------------------------------------------------------------
+
+	/// Host: sends every chunk until the guest has them all. Chunks the guest
+	/// hasn't acknowledged are resent after about two round trips.
+	static bool SendState()
+	{
+		std::vector<Clock::time_point> sent_at(s_state_chunks);
+		const Clock::time_point start = Clock::now();
+		Clock::time_point last_progress = start, last_log = start;
+		u32 last_count = 0;
+		u32 base = 0;
+		while (!s_state_complete)
+		{
+			const Clock::time_point now = Clock::now();
+			const auto resend_after = std::chrono::milliseconds(std::max(30, static_cast<int>(RoundTripMs() * 2 + 10)));
+			while (base < s_state_chunks && s_state_have[base])
+				base++;
+			for (u32 i = base; i < std::min(base + STATE_WINDOW, s_state_chunks); i++)
+			{
+				if (s_state_have[i] || (sent_at[i] != Clock::time_point() && now - sent_at[i] < resend_after))
+					continue;
+				StateChunkPacket chunk = {};
+				FillHeader(chunk.header, PACKET_STATE_CHUNK);
+				chunk.index = i;
+				const u64 offset = u64{i} * STATE_CHUNK_SIZE;
+				chunk.size = static_cast<u16>(std::min<u64>(STATE_CHUNK_SIZE, s_state_size - offset));
+				std::memcpy(chunk.data, s_state_data.data() + offset, chunk.size);
+				SendPacket(&chunk, sizeof(chunk));
+				sent_at[i] = now;
+			}
+
+			pollfd pfd = {s_socket, POLLIN, 0};
+			poll(&pfd, 1, 1);
+			Receive();
+
+			if (s_state_have_count != last_count)
+			{
+				last_count = s_state_have_count;
+				last_progress = now;
+			}
+			if (now - last_log > std::chrono::seconds(2))
+			{
+				last_log = now;
+				Log("sending the save state: %u of %u KB", static_cast<u32>(u64{s_state_have_count} * STATE_CHUNK_SIZE / 1024),
+					s_state_size / 1024);
+			}
+			if (now - last_progress > std::chrono::seconds(30) || VMStopping())
+			{
+				Log("error: the other player stopped receiving the save state");
+				return false;
+			}
+		}
+		const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
+		Log("save state sent: %u KB in %.1f s", s_state_size / 1024, seconds);
+		return true;
+	}
+
+	/// Guest: collects the chunks, acknowledging every 10 ms, checks the hash
+	/// and writes the file.
+	static bool ReceiveState()
+	{
+		const Clock::time_point start = Clock::now();
+		Clock::time_point last_progress = start, last_log = start;
+		u32 last_count = 0;
+		while (s_state_have_count < s_state_chunks)
+		{
+			pollfd pfd = {s_socket, POLLIN, 0};
+			poll(&pfd, 1, 1);
+			Receive();
+
+			const Clock::time_point now = Clock::now();
+			if (now - s_state_last_ack > std::chrono::milliseconds(10))
+				SendStateAck();
+			if (s_state_have_count != last_count)
+			{
+				last_count = s_state_have_count;
+				last_progress = now;
+			}
+			if (now - last_log > std::chrono::seconds(2))
+			{
+				last_log = now;
+				Log("receiving the save state: %u of %u KB", static_cast<u32>(u64{s_state_have_count} * STATE_CHUNK_SIZE / 1024),
+					s_state_size / 1024);
+			}
+			if (now - last_progress > std::chrono::seconds(30) || VMStopping())
+			{
+				Log("error: the host stopped sending the save state");
+				return false;
+			}
+		}
+		if (XXH3_64bits(s_state_data.data(), s_state_data.size()) != s_state_hash)
+		{
+			Log("error: the received save state is corrupt (hash mismatch)");
+			return false;
+		}
+		if (!FileSystem::WriteBinaryFile(s_state_path.c_str(), s_state_data.data(), s_state_data.size()))
+		{
+			Log("error: can't write the received save state to %s", s_state_path.c_str());
+			return false;
+		}
+		s_state_complete = true;
+		for (int i = 0; i < 5; i++)
+			SendStateAck(); // "done"; more follow if the host keeps sending
+		const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
+		Log("save state received: %u KB in %.1f s", s_state_size / 1024, seconds);
+		return true;
+	}
+
+	/// Both machines: load the state later in this same vsync (queued work is
+	/// run when the CPU thread pumps messages after the vsync hooks). The
+	/// memory-card-busy check of VMManager::LoadState is skipped on purpose:
+	/// it depends on real time, so it could refuse on one machine only.
+	static void QueueStateLoad()
+	{
+		Host::RunOnCPUThread([path = s_state_path]() {
+			Error error;
+			if (SaveState_UnzipFromDisk(path, &error))
+				Log("save state loaded; netplay frame 0 is the next frame");
+			else
+				Log("error: loading the save state failed: %s", error.GetDescription().c_str());
+		});
+	}
+
+	static bool TransferState()
+	{
+		s_state_chunks = (s_state_size + STATE_CHUNK_SIZE - 1) / STATE_CHUNK_SIZE;
+		s_state_have.assign(s_state_chunks, false);
+		s_state_have_count = 0;
+		if (!s_is_host)
+		{
+			s_state_data.assign(s_state_size, 0);
+			s_state_path = Path::Combine(EmuFolders::DataRoot, "netplay-received.p2s");
+		}
+		Log("%s the save state (%u KB)...", s_is_host ? "sending" : "receiving", s_state_size / 1024);
+		if (!(s_is_host ? SendState() : ReceiveState()))
+			return false;
+		s_state_data.clear();
+		s_state_data.shrink_to_fit();
+		QueueStateLoad();
+		return true;
+	}
+
+	// ------------------------------------------------------------------------
 	// Lockstep
 	// ------------------------------------------------------------------------
 
@@ -1358,6 +1676,20 @@ namespace Netplay
 			return;
 		}
 		UpdateRoute();
+
+		if (s_state_phase == StatePhase::Transfer)
+		{
+			s_state_phase = StatePhase::Done;
+			if (!TransferState())
+			{
+				Log("netplay stopped");
+				s_active = false;
+				return;
+			}
+			// The state loads later in this vsync; lockstep frame 0 is the next one.
+			s_second_start = Clock::now();
+			return;
+		}
 
 		const s64 f = s_frame;
 

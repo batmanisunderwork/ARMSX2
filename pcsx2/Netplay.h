@@ -29,6 +29,9 @@
 ///                            pairs the players, who then connect directly
 ///                            (UDP hole punching) or through the lobby's relay
 ///   ARMSX2_NETPLAY_FORCE_RELAY  skip the direct attempt (testing)
+///   ARMSX2_NETPLAY_STATE     host: start from this save state (.p2s) instead
+///                            of power-on; it is sent to the guest and both
+///                            load it before frame 0
 ///   ARMSX2_NETPLAY_DELAY     host: fixed input delay in frames; unset or
 ///                            "auto" adapts it to the connection
 ///   ARMSX2_NETPLAY_MIN_DELAY host: adaptive delay range (default 2..15)
