@@ -23,7 +23,12 @@
 /// Inactive unless ARMSX2_NETPLAY is set. Environment:
 ///   ARMSX2_NETPLAY           "host" or "join"
 ///   ARMSX2_NETPLAY_PORT      local UDP port (default 7777 host / 7778 join)
-///   ARMSX2_NETPLAY_PEER      peer address "ip:port"
+///   ARMSX2_NETPLAY_PEER      peer address "ip:port", or instead:
+///   ARMSX2_NETPLAY_SERVER    lobby "host:port" and
+///   ARMSX2_NETPLAY_ROOM      room code (same for both players); the lobby
+///                            pairs the players, who then connect directly
+///                            (UDP hole punching) or through the lobby's relay
+///   ARMSX2_NETPLAY_FORCE_RELAY  skip the direct attempt (testing)
 ///   ARMSX2_NETPLAY_DELAY     host: fixed input delay in frames; unset or
 ///                            "auto" adapts it to the connection
 ///   ARMSX2_NETPLAY_MIN_DELAY host: adaptive delay range (default 2..15)

@@ -23,12 +23,14 @@
 #include "common/RedtapeWindows.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 using socket_t = SOCKET;
 static constexpr socket_t BAD_SOCKET = INVALID_SOCKET;
 #define poll WSAPoll
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -40,6 +42,7 @@ static constexpr socket_t BAD_SOCKET = -1;
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
@@ -49,6 +52,7 @@ static constexpr socket_t BAD_SOCKET = -1;
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <random>
 #include <thread>
 #include <string>
 #include <type_traits>
@@ -165,6 +169,32 @@ namespace Netplay
 	static bool s_session_started = false;
 	static socket_t s_socket = BAD_SOCKET;
 	static sockaddr_in s_peer = {};
+
+	// Lobby (room codes). With ARMSX2_NETPLAY_SERVER and _ROOM instead of
+	// _PEER, the lobby tells each player the other's public and LAN address.
+	// Both send to all of them at once (UDP hole punching) and keep the first
+	// that answers; if none does, they relay through the lobby. The lobby is
+	// contacted from the game socket so the NAT mapping it sees is the one the
+	// peer must reach.
+	enum class Route : u8
+	{
+		Direct, // to s_peer
+		Probing, // to every candidate address of the peer
+		Relay, // through the lobby
+	};
+	static constexpr size_t RELAY_HEADER_SIZE = 16; // "NPR1", side, 3 zero bytes, token (u64 LE)
+	static constexpr auto PROBE_TIMEOUT = std::chrono::seconds(3);
+	static std::atomic<Route> s_route{Route::Direct};
+	static bool s_use_lobby = false;
+	static bool s_force_relay = false;
+	static sockaddr_in s_lobby = {};
+	static std::string s_room;
+	static std::string s_client_id;
+	static bool s_lobby_paired = false;
+	static std::vector<sockaddr_in> s_candidates;
+	static u64 s_relay_token = 0;
+	static u8 s_relay_side = 0;
+	static std::chrono::steady_clock::time_point s_probe_start;
 	static std::FILE* s_log = nullptr;
 	static bool s_scripted = false;
 	static u32 s_script_seed = 0;
@@ -198,6 +228,8 @@ namespace Netplay
 	static s64 s_stall_floor_until = -1;
 	/// When the current 60-frame stretch began, to spot real slowdowns.
 	static Clock::time_point s_second_start;
+	/// Frame of the last delay rise: the slowdown that caused it isn't jitter.
+	static s64 s_last_rise_frame = -1000;
 
 	// Round-trip time. Packets are only read once per frame, so a sample can
 	// include up to a frame of waiting in our socket; the minimum over the last
@@ -249,10 +281,78 @@ namespace Netplay
 		return static_cast<u32>(us) | 1u; // 0 means "nothing to echo"
 	}
 
-	static int SendTo(const void* data, size_t size)
+	static void SendRaw(const sockaddr_in& to, const void* data, size_t size)
 	{
-		return static_cast<int>(sendto(s_socket, reinterpret_cast<const char*>(data), static_cast<int>(size), 0,
-			reinterpret_cast<const sockaddr*>(&s_peer), sizeof(s_peer)));
+		sendto(s_socket, reinterpret_cast<const char*>(data), static_cast<int>(size), 0,
+			reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+	}
+
+	/// Sends a game packet along the current route. Also called from the
+	/// latency simulation thread.
+	static void SendTo(const void* data, size_t size)
+	{
+		switch (s_route.load(std::memory_order_acquire))
+		{
+			case Route::Direct:
+				SendRaw(s_peer, data, size);
+				break;
+			case Route::Probing:
+				for (const sockaddr_in& candidate : s_candidates)
+					SendRaw(candidate, data, size);
+				break;
+			case Route::Relay:
+			{
+				std::array<u8, 512> buffer;
+				if (RELAY_HEADER_SIZE + size > buffer.size())
+					break;
+				std::memcpy(buffer.data(), "NPR1", 4);
+				buffer[4] = s_relay_side;
+				buffer[5] = buffer[6] = buffer[7] = 0;
+				for (int i = 0; i < 8; i++)
+					buffer[8 + i] = static_cast<u8>(s_relay_token >> (8 * i));
+				std::memcpy(buffer.data() + RELAY_HEADER_SIZE, data, size);
+				SendRaw(s_lobby, buffer.data(), RELAY_HEADER_SIZE + size);
+				break;
+			}
+		}
+	}
+
+	static std::string AddressText(const sockaddr_in& addr)
+	{
+		char ip[INET_ADDRSTRLEN] = {};
+		inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
+		return std::string(ip) + ":" + std::to_string(ntohs(addr.sin_port));
+	}
+
+	static bool SameAddress(const sockaddr_in& a, const sockaddr_in& b)
+	{
+		return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
+	}
+
+	/// Parses "ip:port" or, if `resolve`, "hostname:port".
+	static bool ParseAddress(std::string_view text, sockaddr_in* out, bool resolve = false)
+	{
+		const size_t colon = text.rfind(':');
+		if (colon == std::string_view::npos)
+			return false;
+		const std::string host(text.substr(0, colon));
+		const std::string port(text.substr(colon + 1));
+		*out = {};
+		out->sin_family = AF_INET;
+		out->sin_port = htons(static_cast<u16>(std::strtoul(port.c_str(), nullptr, 10)));
+		if (inet_pton(AF_INET, host.c_str(), &out->sin_addr) == 1)
+			return true;
+		if (!resolve)
+			return false;
+		addrinfo hints = {};
+		hints.ai_family = AF_INET;
+		hints.ai_socktype = SOCK_DGRAM;
+		addrinfo* result = nullptr;
+		if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || !result)
+			return false;
+		out->sin_addr = reinterpret_cast<const sockaddr_in*>(result->ai_addr)->sin_addr;
+		freeaddrinfo(result);
+		return true;
 	}
 
 	static u8 Quantize(float value)
@@ -325,26 +425,40 @@ namespace Netplay
 			std::getenv("ARMSX2_NETPLAY_PORT") ? std::getenv("ARMSX2_NETPLAY_PORT") : (s_is_host ? "7777" : "7778"),
 			nullptr, 10));
 
-		const char* peer = std::getenv("ARMSX2_NETPLAY_PEER");
-		const char* colon = peer ? std::strrchr(peer, ':') : nullptr;
-		if (!colon)
-		{
-			Log("error: ARMSX2_NETPLAY_PEER must be ip:port");
-			return;
-		}
-		const std::string peer_ip(peer, colon);
-		s_peer.sin_family = AF_INET;
-		s_peer.sin_port = htons(static_cast<u16>(std::strtoul(colon + 1, nullptr, 10)));
-		if (inet_pton(AF_INET, peer_ip.c_str(), &s_peer.sin_addr) != 1)
-		{
-			Log("error: bad peer address %s", peer);
-			return;
-		}
-
 #ifdef _WIN32
 		WSADATA wsa;
 		WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
+
+		std::string peer_text;
+		const char* server = std::getenv("ARMSX2_NETPLAY_SERVER");
+		const char* room = std::getenv("ARMSX2_NETPLAY_ROOM");
+		if (server && *server && room && *room)
+		{
+			if (!ParseAddress(server, &s_lobby, true))
+			{
+				Log("error: can't resolve the lobby server %s (use host:port)", server);
+				return;
+			}
+			s_use_lobby = true;
+			s_room = room;
+			s_force_relay = std::getenv("ARMSX2_NETPLAY_FORCE_RELAY") != nullptr;
+			std::random_device random;
+			char id[17];
+			std::snprintf(id, sizeof(id), "%08x%08x", random(), random());
+			s_client_id = id;
+			peer_text = "room " + s_room + " via lobby " + AddressText(s_lobby);
+		}
+		else
+		{
+			const char* peer = std::getenv("ARMSX2_NETPLAY_PEER");
+			if (!peer || !ParseAddress(peer, &s_peer))
+			{
+				Log("error: set ARMSX2_NETPLAY_PEER=ip:port, or ARMSX2_NETPLAY_SERVER=host:port and ARMSX2_NETPLAY_ROOM");
+				return;
+			}
+			peer_text = "peer " + AddressText(s_peer);
+		}
 		s_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 		sockaddr_in local = {};
 		local.sin_family = AF_INET;
@@ -358,19 +472,25 @@ namespace Netplay
 #ifdef _WIN32
 		u_long nonblocking = 1;
 		ioctlsocket(s_socket, FIONBIO, &nonblocking);
+		// Otherwise a probe to an address nobody listens on makes the next
+		// recvfrom() fail with WSAECONNRESET.
+		BOOL report_reset = FALSE;
+		DWORD bytes = 0;
+		WSAIoctl(s_socket, SIO_UDP_CONNRESET, &report_reset, sizeof(report_reset), nullptr, 0, &bytes, nullptr, nullptr);
 #else
 		fcntl(s_socket, F_SETFL, fcntl(s_socket, F_GETFL, 0) | O_NONBLOCK);
 #endif
 
 		s_active = true;
+		const char* peer = peer_text.c_str();
 		if (!s_is_host)
-			Log("netplay guest (player 2), port %u, peer %s%s; the host chooses the input delay", port, peer,
+			Log("netplay guest (player 2), port %u, %s%s; the host chooses the input delay", port, peer,
 				s_scripted ? ", scripted input" : "");
 		else if (s_fixed_delay)
-			Log("netplay host (player 1), port %u, peer %s, fixed delay %u frames%s", port, peer, s_delay,
+			Log("netplay host (player 1), port %u, %s, fixed delay %u frames%s", port, peer, s_delay,
 				s_scripted ? ", scripted input" : "");
 		else
-			Log("netplay host (player 1), port %u, peer %s, adaptive delay %u-%u frames%s", port, peer, s_min_delay,
+			Log("netplay host (player 1), port %u, %s, adaptive delay %u-%u frames%s", port, peer, s_min_delay,
 				s_max_delay, s_scripted ? ", scripted input" : "");
 	}
 
@@ -684,7 +804,7 @@ namespace Netplay
 		// so the host sees it for both. Allow up to 2 frames extra, and keep
 		// that for 10 seconds before trusting the round-trip time again. (A PC
 		// too slow for the game also lands here; the cap keeps that harmless.)
-		const bool slowed = second_ms > 60 * FrameMs() * 1.03;
+		const bool slowed = second_ms > 60 * FrameMs() * 1.03 && s_frame - s_last_rise_frame > 120;
 		if (slowed && s_delay >= up && s_delay < std::min(up + 2, s_max_delay))
 		{
 			s_stall_floor = s_delay + 1;
@@ -695,6 +815,7 @@ namespace Netplay
 		if (std::max(up, stall_floor) > s_delay)
 		{
 			s_lower_streak = 0;
+			s_last_rise_frame = s_frame;
 			SetDelay(std::max(up, stall_floor), stall_floor > up ? "game slowed down" : "latency rose");
 		}
 		else if (std::max(down, stall_floor) < s_delay)
@@ -938,14 +1059,126 @@ namespace Netplay
 		}
 	}
 
+	// ------------------------------------------------------------------------
+	// Lobby
+	// ------------------------------------------------------------------------
+
+	/// Registers with the lobby (repeated until it pairs us with the peer).
+	static void SendLobbyJoin()
+	{
+		// Our LAN address: the local end of a route to the lobby. connect() on
+		// a UDP socket sends nothing.
+		sockaddr_in lan = {};
+		const socket_t probe = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+		if (probe != BAD_SOCKET)
+		{
+			socklen_t len = sizeof(lan);
+			if (connect(probe, reinterpret_cast<const sockaddr*>(&s_lobby), sizeof(s_lobby)) != 0 ||
+				getsockname(probe, reinterpret_cast<sockaddr*>(&lan), &len) != 0)
+				lan = {};
+#ifdef _WIN32
+			closesocket(probe);
+#else
+			close(probe);
+#endif
+		}
+		sockaddr_in bound = {};
+		socklen_t bound_len = sizeof(bound);
+		getsockname(s_socket, reinterpret_cast<sockaddr*>(&bound), &bound_len);
+		lan.sin_family = AF_INET;
+		lan.sin_port = bound.sin_port;
+
+		const std::string message = "NPL1 JOIN " + s_room + (s_is_host ? " host " : " join ") + AddressText(lan) + " " +
+									std::to_string(PROTOCOL_VERSION) + " " + s_client_id;
+		SendRaw(s_lobby, message.data(), message.size());
+	}
+
+	static void OnLobbyMessage(std::string_view text)
+	{
+		std::vector<std::string> words;
+		for (size_t pos = 0; pos < text.size();)
+		{
+			const size_t end = std::min(text.find(' ', pos), text.size());
+			if (end > pos)
+				words.emplace_back(text.substr(pos, end - pos));
+			pos = end + 1;
+		}
+		if (words.empty())
+			return;
+
+		if (words[0] == "WAIT")
+		{
+			static bool logged = false;
+			if (!logged)
+				Log("lobby: in room %s, waiting for the other player", s_room.c_str());
+			logged = true;
+		}
+		else if (words[0] == "ERROR" && !s_session_started)
+		{
+			std::string reason = "the lobby refused to join room " + s_room + ":";
+			for (size_t i = 1; i < words.size(); i++)
+				reason += " " + words[i];
+			FailSession({reason});
+		}
+		else if (words[0] == "PEER" && words.size() >= 5 && !s_lobby_paired)
+		{
+			// Addresses are fixed from here on: the latency thread may be
+			// reading them. (A peer that restarts gets a new room session.)
+			sockaddr_in public_addr, lan_addr;
+			if (!ParseAddress(words[1], &public_addr))
+				return;
+			s_candidates.push_back(public_addr);
+			if (ParseAddress(words[2], &lan_addr) && lan_addr.sin_addr.s_addr != 0 && !SameAddress(lan_addr, public_addr))
+				s_candidates.push_back(lan_addr);
+			s_relay_token = std::strtoull(words[3].c_str(), nullptr, 16);
+			s_relay_side = static_cast<u8>(std::strtoul(words[4].c_str(), nullptr, 10));
+			s_lobby_paired = true;
+			s_probe_start = Clock::now();
+			s_route.store(s_force_relay ? Route::Relay : Route::Probing, std::memory_order_release);
+			Log("lobby: paired; the other player is at %s (LAN %s)%s", words[1].c_str(), words[2].c_str(),
+				s_force_relay ? "; relaying as requested" : "; trying a direct connection");
+		}
+	}
+
+	/// Falls back to the relay when no direct packet arrived in time.
+	static void UpdateRoute()
+	{
+		if (s_route.load(std::memory_order_relaxed) == Route::Probing && Clock::now() - s_probe_start > PROBE_TIMEOUT)
+		{
+			s_route.store(Route::Relay, std::memory_order_release);
+			Log("no direct path to the other player; relaying through the lobby");
+		}
+	}
+
 	static void Receive()
 	{
 		PacketBuffer buffer;
-		for (;;)
+		for (int errors = 0; errors < 64;)
 		{
-			const int len = static_cast<int>(recv(s_socket, reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), 0));
+			sockaddr_in from = {};
+			socklen_t from_len = sizeof(from);
+			const int len = static_cast<int>(recvfrom(s_socket, reinterpret_cast<char*>(buffer.data()),
+				static_cast<int>(buffer.size()), 0, reinterpret_cast<sockaddr*>(&from), &from_len));
 			if (len < 0)
-				break;
+			{
+#ifdef _WIN32
+				if (WSAGetLastError() == WSAEWOULDBLOCK)
+					break;
+#else
+				if (errno == EAGAIN || errno == EWOULDBLOCK)
+					break;
+#endif
+				errors++; // e.g. an ICMP "port unreachable" from probing; keep reading
+				continue;
+			}
+
+			const bool from_lobby = s_use_lobby && SameAddress(from, s_lobby);
+			if (from_lobby && len >= 5 && std::memcmp(buffer.data(), "NPL1 ", 5) == 0)
+			{
+				OnLobbyMessage(std::string_view(reinterpret_cast<const char*>(buffer.data()) + 5, static_cast<size_t>(len) - 5));
+				continue;
+			}
+
 			if (len < static_cast<int>(sizeof(Header)))
 				continue;
 			Header header;
@@ -959,6 +1192,25 @@ namespace Netplay
 								 std::to_string(header.protocol) + ", ours " + std::to_string(PROTOCOL_VERSION) + ")"});
 				continue;
 			}
+
+			if (s_use_lobby)
+			{
+				const Route route = s_route.load(std::memory_order_relaxed);
+				if (!from_lobby && route != Route::Direct && !s_force_relay)
+				{
+					// A packet straight from the peer: that path works.
+					s_peer = from;
+					s_route.store(Route::Direct, std::memory_order_release);
+					Log("direct connection to the other player at %s", AddressText(from).c_str());
+				}
+				else if (from_lobby && route == Route::Probing)
+				{
+					// The peer gave up on a direct path, so ours doesn't work either.
+					s_route.store(Route::Relay, std::memory_order_release);
+					Log("the other player is relaying; relaying through the lobby too");
+				}
+			}
+
 			s_received++;
 			OnHeader(header);
 
@@ -997,12 +1249,23 @@ namespace Netplay
 
 		Log("waiting for the other player...");
 		Clock::time_point last_hello = {};
+		Clock::time_point last_join = {};
 		Clock::time_point last_notice = Clock::now();
 		for (;;)
 		{
 			const Clock::time_point now = Clock::now();
-			if (now - last_hello >= HELLO_INTERVAL)
+			if (s_use_lobby && !s_lobby_paired)
 			{
+				// Nowhere to send HELLOs yet; keep asking the lobby.
+				if (now - last_join >= std::chrono::milliseconds(500))
+				{
+					SendLobbyJoin();
+					last_join = now;
+				}
+			}
+			else if (now - last_hello >= HELLO_INTERVAL)
+			{
+				UpdateRoute();
 				SendHello();
 				last_hello = now;
 			}
@@ -1039,7 +1302,9 @@ namespace Netplay
 			if (now - last_notice > std::chrono::seconds(5))
 			{
 				last_notice = now;
-				Log(s_peer_checked ? "measuring the connection..." : "still waiting for the other player...");
+				Log(s_peer_checked ? "measuring the connection..." :
+					(s_use_lobby && !s_lobby_paired) ? "still waiting for the lobby to pair us..." :
+													   "still waiting for the other player...");
 			}
 		}
 
@@ -1047,8 +1312,10 @@ namespace Netplay
 		s_delay = s_start_delay;
 		s_second_start = Clock::now();
 		s_last_recorded = static_cast<s64>(s_start_delay) - 1;
-		Log("session started: delay %u frames (%.0f ms), rtt %.1f ms (min %.1f ms)", s_start_delay,
-			s_start_delay * FRAME_MS, s_srtt_ms, RoundTripMs());
+		static constexpr const char* route_names[] = {"direct", "probing", "relayed"};
+		Log("session started: delay %u frames (%.0f ms), rtt %.1f ms (min %.1f ms), %s", s_start_delay,
+			s_start_delay * FrameMs(), s_srtt_ms, RoundTripMs(),
+			s_use_lobby ? route_names[static_cast<int>(s_route.load())] : "direct");
 		return true;
 	}
 
@@ -1087,6 +1354,7 @@ namespace Netplay
 			s_active = false;
 			return;
 		}
+		UpdateRoute();
 
 		const s64 f = s_frame;
 
@@ -1126,6 +1394,7 @@ namespace Netplay
 			const Clock::time_point now = Clock::now();
 			if (now - last_send > std::chrono::milliseconds(16))
 			{
+				UpdateRoute();
 				SendInput(); // keep the peer fed in case our last packet was lost
 				last_send = now;
 			}
