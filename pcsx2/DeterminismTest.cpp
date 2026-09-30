@@ -126,8 +126,7 @@ namespace DeterminismTest
 			Host::RunOnCPUThread([path = s_save_path]() {
 				VMManager::SaveState(path.c_str(), false, false, [](const std::string& error) {
 					if (s_log)
-						std::fprintf(s_log, "# save state failed: %s
-", error.c_str());
+						std::fprintf(s_log, "# save state failed: %s\n", error.c_str());
 				});
 			});
 		}
