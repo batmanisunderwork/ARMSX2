@@ -172,6 +172,9 @@ namespace Netplay
 	static u32 s_loss_percent = 0;
 	/// Simulated one-way network latency for testing, in milliseconds.
 	static u32 s_latency_ms = 0;
+	/// Test schedule "frame:ms,frame:ms,...": changes the simulated latency
+	/// at those frames, to exercise the adaptive delay.
+	static std::vector<std::pair<s64, u32>> s_latency_plan;
 
 	// Input delay. Local input sampled at frame f is used at frame f + delay.
 	// The host chooses the delay (fixed, or adapted to the measured round-trip
@@ -302,6 +305,19 @@ namespace Netplay
 			s_loss_percent = std::min<u32>(static_cast<u32>(std::strtoul(v, nullptr, 10)), 90);
 		if (const char* v = std::getenv("ARMSX2_NETPLAY_LATENCY"))
 			s_latency_ms = std::min<u32>(static_cast<u32>(std::strtoul(v, nullptr, 10)), 1000);
+		if (const char* v = std::getenv("ARMSX2_NETPLAY_LATENCY_PLAN"))
+		{
+			for (const char* p = v; *p;)
+			{
+				char* end;
+				const s64 frame = std::strtoll(p, &end, 10);
+				if (*end != ':')
+					break;
+				const u32 ms = std::min<u32>(static_cast<u32>(std::strtoul(end + 1, &end, 10)), 1000);
+				s_latency_plan.emplace_back(frame, ms);
+				p = *end == ',' ? end + 1 : end;
+			}
+		}
 
 		const u16 port = static_cast<u16>(std::strtoul(
 			std::getenv("ARMSX2_NETPLAY_PORT") ? std::getenv("ARMSX2_NETPLAY_PORT") : (s_is_host ? "7777" : "7778"),
@@ -1043,6 +1059,15 @@ namespace Netplay
 		}
 
 		const s64 f = s_frame;
+
+		for (const auto& [frame, ms] : s_latency_plan)
+		{
+			if (frame == f)
+			{
+				Log("frame %lld: simulated latency %u -> %u ms", static_cast<long long>(f), s_latency_ms, ms);
+				s_latency_ms = ms;
+			}
+		}
 
 		// 1. Record our input for every frame up to f + delay not yet recorded.
 		// After the delay drops, this records nothing until f + delay passes

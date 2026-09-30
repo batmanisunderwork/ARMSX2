@@ -33,6 +33,7 @@
 ///   ARMSX2_NETPLAY_FRAMES    exit after this many frames (for automated tests)
 ///   ARMSX2_NETPLAY_LOSS      simulated outgoing packet loss, percent
 ///   ARMSX2_NETPLAY_LATENCY   simulated one-way latency, ms
+///   ARMSX2_NETPLAY_LATENCY_PLAN  "frame:ms,..." changes it during the run
 namespace Netplay
 {
 	/// Called at every vsync on the CPU thread. Blocks until the peer's input
