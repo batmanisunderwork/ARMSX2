@@ -1,25 +1,72 @@
-name: macOS x86-64 build (netplay, for Rosetta)
-# ARMSX2 for Intel macOS (x86-64). On Apple Silicon Macs it runs through
-# Rosetta 2 and then uses the same x86-64 recompilers as the Windows build,
-# which may make Mac <-> Windows netplay deterministic. Mirrors
-# macos_build.yml (arm64) with CMAKE_OSX_ARCHITECTURES=x86_64; the
-# dependency script already builds universal (x86_64 + arm64) libraries.
-# The first run builds Qt and the other dependencies (1-2 hours); later
-# runs use the cache.
+name: macOS builds (netplay; x86-64 for Rosetta, arm64 native)
+# x86-64: on Apple Silicon it runs through Rosetta 2 and then uses the same
+# x86-64 recompilers as the Windows build, which may make Mac <-> Windows
+# netplay deterministic. arm64: the native build of this branch, for the
+# ReferenceTiming (cross-platform timing) work. Mirrors macos_build.yml.
+# The dependency script builds universal (x86_64 + arm64) libraries once;
+# the first run takes 1-2 hours, later runs use the cache.
 on:
   push:
     branches: [phone-input]
   workflow_dispatch:
 
 permissions:
-  contents: write # to publish the build as a GitHub Release
+  contents: write # to publish the builds as GitHub Releases
 
 jobs:
-  build_macos_x64:
-    name: macOS x86-64
+  dependencies:
+    name: macOS dependencies (universal)
     runs-on: macos-26
-    # Qt and the other dependencies take a long time on a cold cache.
-    timeout-minutes: 300
+    timeout-minutes: 240
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Use Xcode 26.5
+        run: sudo xcode-select -s /Applications/Xcode_26.5.app
+
+      - name: Cache Dependencies
+        id: cache-deps
+        uses: actions/cache@v6
+        with:
+          path: ~/deps
+          key: macos-26 universal deps ${{ hashFiles('.github/workflows/scripts/macos/*', '.github/workflows/scripts/common/*.patch') }}
+
+      - name: Install Packages
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+          HOMEBREW_NO_ANALYTICS: 1
+        run: |
+          if ! brew install nasm; then
+            brew update
+            brew install nasm
+          fi
+
+      - name: Build Dependencies
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: .github/workflows/scripts/macos/build-dependencies-universal.sh "$HOME/deps"
+
+  build:
+    name: macOS ${{ matrix.arch }}
+    needs: dependencies
+    runs-on: macos-26
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Same instruction set as the Windows x64 build: a single SSE4.1
+          # build (DISABLE_ADVANCE_SIMD=OFF; ON would mean multi-ISA). CMake
+          # adds no x86 flags when cross-compiling on Apple Silicon.
+          - arch: x86_64
+            name: x64
+            cmake: -DDISABLE_ADVANCE_SIMD=OFF -DCMAKE_C_FLAGS=-msse4.1\ -mfxsr -DCMAKE_CXX_FLAGS=-msse4.1\ -mfxsr
+            notes: ARMSX2 for Intel macOS. On Apple Silicon it runs through Rosetta 2 with the same x86-64 recompilers as the Windows x64 build (Mac <-> Windows determinism test).
+          - arch: arm64
+            name: arm64
+            cmake: -DDISABLE_ADVANCE_SIMD=ON
+            notes: Native Apple Silicon build of this branch (phone input, netplay, ReferenceTiming work).
     env:
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -46,22 +93,17 @@ jobs:
           HOMEBREW_NO_INSTALL_CLEANUP: 1
           HOMEBREW_NO_ANALYTICS: 1
         run: |
-          if ! brew install ccache nasm aria2; then
+          if ! brew install ccache aria2; then
             brew update
-            brew install ccache nasm aria2
+            brew install ccache aria2
           fi
 
-      - name: Cache Dependencies
-        id: cache-deps
-        uses: actions/cache@v6
+      - name: Restore Dependencies
+        uses: actions/cache/restore@v6
         with:
           path: ~/deps
           key: macos-26 universal deps ${{ hashFiles('.github/workflows/scripts/macos/*', '.github/workflows/scripts/common/*.patch') }}
-
-      - name: Build Dependencies
-        if: steps.cache-deps.outputs.cache-hit != 'true'
-        run: |
-          .github/workflows/scripts/macos/build-dependencies-universal.sh "$HOME/deps"
+          fail-on-cache-miss: true
 
       - name: Download patches
         run: |
@@ -76,21 +118,15 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .ccache
-          key: macos-26 x86_64 ccache ${{ steps.ccache_cache_timestamp.outputs.timestamp }}
-          restore-keys: macos-26 x86_64 ccache
+          key: macos-26 ${{ matrix.arch }} ccache ${{ steps.ccache_cache_timestamp.outputs.timestamp }}
+          restore-keys: macos-26 ${{ matrix.arch }} ccache
 
-      # Same instruction set as the Windows x64 build: a single SSE4.1 build
-      # (DISABLE_ADVANCE_SIMD=OFF; ON would mean multi-ISA SSE4/AVX/AVX2).
-      # CMake adds no x86 flags when cross-compiling on Apple Silicon, so set
-      # SSE4.1 explicitly.
       - name: Generate CMake Files
         run: |
           cmake -DCMAKE_PREFIX_PATH="$HOME/deps" \
                 -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_OSX_ARCHITECTURES="x86_64" \
-                -DDISABLE_ADVANCE_SIMD=OFF \
-                -DCMAKE_C_FLAGS="-msse4.1 -mfxsr" \
-                -DCMAKE_CXX_FLAGS="-msse4.1 -mfxsr" \
+                -DCMAKE_OSX_ARCHITECTURES="${{ matrix.arch }}" \
+                ${{ matrix.cmake }} \
                 -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
                 -DUSE_LINKED_FFMPEG=ON \
                 -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -110,21 +146,21 @@ jobs:
           mv build/pcsx2*/ARMSX2.app ARMSX2.app
           lipo -archs ARMSX2.app/Contents/MacOS/ARMSX2
           codesign --force --deep --sign - ARMSX2.app
-          tar --options xz:compression-level=9 -cJf ARMSX2-netplay-macos-x64.tar.xz ARMSX2.app
+          tar --options xz:compression-level=9 -cJf ARMSX2-netplay-macos-${{ matrix.name }}.tar.xz ARMSX2.app
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ARMSX2-netplay-macos-x64
-          path: ARMSX2-netplay-macos-x64.tar.xz
+          name: ARMSX2-netplay-macos-${{ matrix.name }}
+          path: ARMSX2-netplay-macos-${{ matrix.name }}.tar.xz
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="netplay-mac-x64-${{ github.run_number }}"
-          gh release create "$tag" ARMSX2-netplay-macos-x64.tar.xz \
+          tag="netplay-mac-${{ matrix.name }}-${{ github.run_number }}"
+          gh release create "$tag" ARMSX2-netplay-macos-${{ matrix.name }}.tar.xz \
             --repo ${{ github.repository }} --target ${{ github.sha }} \
-            --title "Netplay test build (macOS x86-64, Rosetta) #${{ github.run_number }}" \
-            --notes "ARMSX2 for Intel macOS; on Apple Silicon it runs through Rosetta 2 with the same x86-64 recompilers as the Windows build. For the Mac <-> Windows determinism test. Ad-hoc signed: right-click > Open the first time." \
+            --title "Netplay test build (macOS ${{ matrix.arch }}) #${{ github.run_number }}" \
+            --notes "${{ matrix.notes }} Ad-hoc signed: right-click > Open the first time." \
             --prerelease
