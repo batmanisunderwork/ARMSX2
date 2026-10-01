@@ -1469,6 +1469,11 @@ static void iBranchTest(u32 newpc)
 			{
 				xFastCall((void*)eeRefAdvanceCycles);
 			}
+			if (EERefBranchTraceEnabled())
+			{
+				xMOV(ecx, ptr32[&g_eeRefPending]);
+				xFastCall((void*)EERefTraceBranch, ecx);
+			}
 		}
 
 		if (exit == EERefExit::NoTest)

@@ -390,6 +390,42 @@ static void EETraceEventTest()
 		std::fflush(file);
 }
 
+static std::FILE* EERefBranchTraceFile()
+{
+	static std::FILE* const file = [] {
+		const char* path = std::getenv("ARMSX2_EE_BRANCH_TRACE");
+		return (path && *path) ? std::fopen(path, "wb") : nullptr;
+	}();
+	return file;
+}
+
+bool EERefBranchTraceEnabled()
+{
+	return EERefBranchTraceFile() != nullptr;
+}
+
+void EERefTraceBranch(u32 pending)
+{
+	std::FILE* const file = EERefBranchTraceFile();
+	if (!file)
+		return;
+	static u64 left = [] {
+		const char* max = std::getenv("ARMSX2_EE_TRACE_MAX");
+		return (max && *max) ? std::strtoull(max, nullptr, 10) : 4000000ull;
+	}();
+	if (left == 0)
+		return;
+	struct
+	{
+		u32 pc;
+		u32 pending;
+		u64 cycle;
+	} record = {cpuRegs.pc, pending, cpuRegs.cycle};
+	std::fwrite(&record, sizeof(record), 1, file);
+	if (--left == 0)
+		std::fflush(file);
+}
+
 __fi void _cpuEventTest_Shared()
 {
 	EETraceEventTest();

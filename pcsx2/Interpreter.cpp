@@ -274,6 +274,8 @@ static void doBranch( u32 target )
 {
 	_doBranch_shared( target );
 	intUpdateCPUCycles();
+	if (EmuConfig.Cpu.Recompiler.ReferenceTiming)
+		EERefTraceBranch(cpuBlockCycles);
 	intEventTest();
 }
 
@@ -285,6 +287,8 @@ void intDoBranch(u32 target)
 	if( Cpu == &intCpu )
 	{
 		intUpdateCPUCycles();
+		if (EmuConfig.Cpu.Recompiler.ReferenceTiming)
+			EERefTraceBranch(cpuBlockCycles);
 		intEventTest();
 	}
 }
