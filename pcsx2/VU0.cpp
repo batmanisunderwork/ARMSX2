@@ -17,6 +17,11 @@
 #include "VUmicro.h"
 #include "Vif_Dma.h"
 #include "MTVU.h"
+#ifdef _M_X86
+// ReferenceTiming (x86/ix86-32/iR5900.cpp)
+extern bool g_eeRefTiming;
+void eeRefAdvanceCycles();
+#endif
 
 #define _Ft_ _Rt_
 #define _Fs_ _Rd_
@@ -54,6 +59,10 @@ __fi void _vu0run(bool breakOnMbit, bool addCycles, bool sync_only) {
 
 	if(!EmuConfig.Cpu.Recompiler.EnableEE)
 		intUpdateCPUCycles();
+#ifdef _M_X86
+	else if (g_eeRefTiming)
+		eeRefAdvanceCycles(); // ReferenceTiming: the recompiler commits its clock here too
+#endif
 
 	u64 startcycle = cpuRegs.cycle;
 	s32 runCycles  = 0x7fffffff;

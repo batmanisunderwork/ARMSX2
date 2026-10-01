@@ -4,6 +4,7 @@
 #pragma once
 extern void _vu0WaitMicro();
 extern void _vu0FinishMicro();
+extern void vu0Sync();
 
 static VURegs& vu0Regs = vuRegs[0];
 
@@ -393,6 +394,29 @@ static void mVUFinishVU0()
 	skipvuidle.SetTarget();
 }
 
+// ReferenceTiming: sync VU0 exactly where and how the interpreter does
+// (VU0.cpp), through the same function. The block's cycles so far go into
+// g_eeRefPending first, since _vu0run commits it while VU0 is running.
+static void mVURefSyncVU0(void (*sync)())
+{
+	iFlushCall(FLUSH_FOR_POSSIBLE_MICRO_EXEC);
+	_freeX86reg(eax);
+	eeRefAccumulateBlockCycles(true);
+	xTEST(ptr32[&VU0.VI[REG_VPU_STAT].UL], 0x1);
+	xForwardJZ32 skipvuidle;
+	xFastCall((void*)sync);
+	skipvuidle.SetTarget();
+}
+
+// ReferenceTiming: the interpreter's sync for COP2 transfers and LQC2/SQC2,
+// vu0Sync() and then, for the interlocked forms, a wait or finish.
+static void mVURefTransferSync(bool interlocked, bool mBitSync)
+{
+	mVURefSyncVU0(vu0Sync);
+	if (interlocked)
+		mVURefSyncVU0(mBitSync ? _vu0WaitMicro : _vu0FinishMicro);
+}
+
 static void TEST_FBRST_RESET(int flagreg, void(*resetFunct)(), int vuIndex)
 {
 	xTEST(xRegister32(flagreg), (vuIndex) ? 0x200 : 0x002);
@@ -405,12 +429,15 @@ static void recCFC2()
 {
 	printCOP2("CFC2");
 
-	COP2_Interlock(false);
+	if (g_eeRefTiming)
+		mVURefTransferSync(cpuRegs.code & 1, false);
+	else
+		COP2_Interlock(false);
 
 	if (!_Rt_)
 		return;
 
-	if (!(cpuRegs.code & 1))
+	if (!g_eeRefTiming && !(cpuRegs.code & 1))
 	{
 		if (g_pCurInstInfo->info & EEINST_COP2_SYNC_VU0)
 			mVUSyncVU0();
@@ -461,12 +488,15 @@ static void recCTC2()
 {
 	printCOP2("CTC2");
 
-	COP2_Interlock(1);
+	if (g_eeRefTiming)
+		mVURefTransferSync(cpuRegs.code & 1, true);
+	else
+		COP2_Interlock(1);
 
 	if (!_Rd_)
 		return;
 
-	if (!(cpuRegs.code & 1))
+	if (!g_eeRefTiming && !(cpuRegs.code & 1))
 	{
 		if (g_pCurInstInfo->info & EEINST_COP2_SYNC_VU0)
 			mVUSyncVU0();
@@ -644,12 +674,15 @@ static void recQMFC2()
 
 	printCOP2("QMFC2");
 
-	COP2_Interlock(false);
+	if (g_eeRefTiming)
+		mVURefTransferSync(cpuRegs.code & 1, false);
+	else
+		COP2_Interlock(false);
 
 	if (!_Rt_)
 		return;
-	
-	if (!(cpuRegs.code & 1))
+
+	if (!g_eeRefTiming && !(cpuRegs.code & 1))
 	{
 		if (g_pCurInstInfo->info & EEINST_COP2_SYNC_VU0)
 			mVUSyncVU0();
@@ -686,12 +719,15 @@ static void recQMFC2()
 static void recQMTC2()
 {
 	printCOP2("QMTC2");
-	COP2_Interlock(true);
+	if (g_eeRefTiming)
+		mVURefTransferSync(cpuRegs.code & 1, true);
+	else
+		COP2_Interlock(true);
 
 	if (!_Rd_)
 		return;
-	
-	if (!(cpuRegs.code & 1))
+
+	if (!g_eeRefTiming && !(cpuRegs.code & 1))
 	{
 		if (g_pCurInstInfo->info & EEINST_COP2_SYNC_VU0)
 			mVUSyncVU0();
@@ -807,7 +843,9 @@ void recCOP2() { recCOP2t[_Rs_](); }
 
 void recLQC2()
 {
-	if (g_pCurInstInfo->info & EEINST_COP2_SYNC_VU0)
+	if (g_eeRefTiming)
+		mVURefTransferSync(false, false);
+	else if (g_pCurInstInfo->info & EEINST_COP2_SYNC_VU0)
 		mVUSyncVU0();
 	else if (g_pCurInstInfo->info & EEINST_COP2_FINISH_VU0)
 		mVUFinishVU0();
@@ -846,7 +884,9 @@ void recLQC2()
 
 void recSQC2()
 {
-	if (g_pCurInstInfo->info & EEINST_COP2_SYNC_VU0)
+	if (g_eeRefTiming)
+		mVURefTransferSync(false, false);
+	else if (g_pCurInstInfo->info & EEINST_COP2_SYNC_VU0)
 		mVUSyncVU0();
 	else if (g_pCurInstInfo->info & EEINST_COP2_FINISH_VU0)
 		mVUFinishVU0();
@@ -891,7 +931,9 @@ REC_FUNC(SQC2);
 void recCOP2_BC2() { recCOP2_BC2t[_Rt_](); }
 void recCOP2_SPEC1()
 {
-	if (g_pCurInstInfo->info & (EEINST_COP2_SYNC_VU0 | EEINST_COP2_FINISH_VU0))
+	if (g_eeRefTiming)
+		mVURefSyncVU0(_vu0FinishMicro); // the interpreter's COP2_SPECIAL
+	else if (g_pCurInstInfo->info & (EEINST_COP2_SYNC_VU0 | EEINST_COP2_FINISH_VU0))
 		mVUFinishVU0();
 
 	recCOP2SPECIAL1t[_Funct_]();

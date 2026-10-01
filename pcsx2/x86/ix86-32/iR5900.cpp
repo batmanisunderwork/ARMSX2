@@ -89,7 +89,7 @@ void eeRefAccumulateBlockCycles(bool restart)
 }
 
 // The interpreter's intUpdateCPUCycles() on g_eeRefPending (other cycle rates).
-static void eeRefAdvanceCycles()
+void eeRefAdvanceCycles()
 {
 	const s8 cyclerate = EmuConfig.Speedhacks.EECycleRate;
 	const u32 pending = g_eeRefPending;
@@ -1956,7 +1956,6 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	if (cpuRegs.code == 0x00000000)
 	{
 		// Note: Tests on a ps2 suggested more like 5 cycles for a NOP. But there's many factors in this..
-		// (ReferenceTiming: the interpreter's cost, i.e. SLL's.)
 		// (ReferenceTiming: the interpreter's cost, i.e. SLL's; the DIE factor is applied at run time.)
 		s_nBlockCycles += g_eeRefTiming ? opcode.cycles : 9 * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
 	}

@@ -35,6 +35,9 @@ extern EERefExit g_eeRefExit;
 // every instruction). With `restart`, the block's count starts over (used
 // before a Config write). Clobbers eax only.
 void eeRefAccumulateBlockCycles(bool restart);
+// ReferenceTiming: the interpreter's intUpdateCPUCycles() on g_eeRefPending.
+// Also called by VU0.cpp's _vu0run, where the interpreter commits its clock.
+void eeRefAdvanceCycles();
 extern bool s_nBlockInterlocked; // Current block has VU0 interlocking
 
 // x86 can use shorter displacement if it fits in an s8, so offset 144 bytes into the cpuRegs
