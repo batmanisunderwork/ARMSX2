@@ -756,7 +756,20 @@ static void psxRecompileIrxImport()
 	{
 		xFastCall((void*)hle);
 		xTEST(eax, eax);
-		xJNZ(iopDispatcherReg);
+		if (g_psxRefTiming)
+		{
+			// Handled: like the interpreter's psxJ, the delay slot (this
+			// import marker) isn't run, the cycles up to the J count, and
+			// execution goes on at the new pc without a branch test.
+			xForwardJZ8 not_handled;
+			xADD(ptr64[&psxRegs.cycle], s_psxBlockCycles - 1);
+			xJMP(iopDispatcherReg);
+			not_handled.SetTarget();
+		}
+		else
+		{
+			xJNZ(iopDispatcherReg);
+		}
 	}
 }
 
