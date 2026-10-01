@@ -1964,7 +1964,18 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	{
 		//If the COP0 DIE bit is disabled, cycles should be doubled.
 		s_nBlockCycles += g_eeRefTiming ? opcode.cycles : opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
-		opcode.recompile();
+		if (g_eeRefTiming && _Opcode_ == 021 && (_Rs_ == 16 || _Rs_ == 20))
+		{
+			// ReferenceTiming: FPU arithmetic (S and W formats) runs through the
+			// interpreter, whose results are the cross-platform reference (the
+			// SSE recompiler's clamping can give different bits).
+			iFlushCall(FLUSH_INTERPRETER);
+			xFastCall((void*)opcode.interpret);
+		}
+		else
+		{
+			opcode.recompile();
+		}
 	}
 
 	if (!swapped_delay_slot)

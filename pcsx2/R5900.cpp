@@ -436,7 +436,7 @@ static void EERefWatch()
 }
 
 // With ARMSX2_EE_GPR_TRACE=<file> (and the branch trace on), every taken branch
-// also records a hash of the GPRs (low 64 bits) and HI/LO: 16 bytes (pc, hash,
+// also records a hash of the GPRs (low 64 bits), HI/LO and the FPU registers: 16 bytes (pc, hash,
 // cycle), to find the first block that computes something differently.
 static void EERefTraceGPRs()
 {
@@ -464,6 +464,9 @@ static void EERefTraceGPRs()
 		mix(cpuRegs.GPR.r[i].UD[0]);
 	mix(cpuRegs.HI.UD[0]);
 	mix(cpuRegs.LO.UD[0]);
+	for (int i = 0; i < 32; i++)
+		mix(fpuRegs.fpr[i].UL);
+	mix(fpuRegs.ACC.UL);
 	struct
 	{
 		u32 pc;
