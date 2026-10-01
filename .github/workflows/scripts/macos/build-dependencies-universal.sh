@@ -436,7 +436,7 @@ echo "Building RapidYAML..."
 rm -fr "rapidyaml-$RAPIDYAML-src"
 tar xf "rapidyaml-$RAPIDYAML-src.tgz"
 cd "rapidyaml-$RAPIDYAML-src"
-cmake "${CMAKE_COMMON[@]}" -DBUILD_SHARED_LIBS=ON -B build
+cmake "${CMAKE_COMMON[@]}" "$CMAKE_ARCH_UNIVERSAL" -DBUILD_SHARED_LIBS=ON -B build
 make -C build "-j$NPROCS"
 make -C build install
 cd ..
