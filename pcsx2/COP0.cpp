@@ -665,6 +665,11 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 
 	void DI()
 	{
+		// ReferenceTiming: like the recompilers, DI takes effect after the next
+		// instruction (a compatibility fix there), unless it's in a delay slot.
+		if (EmuConfig.Cpu.Recompiler.ReferenceTiming && !cpuRegs.branch && intDeferDI())
+			return;
+
 		if (cpuRegs.CP0.n.Status.b._EDI || cpuRegs.CP0.n.Status.b.EXL ||
 			cpuRegs.CP0.n.Status.b.ERL || (cpuRegs.CP0.n.Status.b.KSU == 0))
 		{

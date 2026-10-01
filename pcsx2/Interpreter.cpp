@@ -26,6 +26,25 @@ static u32 intLastBranchTo;
 // ReferenceTiming: a not-taken BEQ/BNE tests for events after its delay slot
 // (where the recompilers' block ends), not before it.
 static bool intRefTestAfterNextOp = false;
+// ReferenceTiming: a DI waiting for the instruction after it to run.
+static bool intRefDIAfterNextOp = false;
+
+bool intDeferDI()
+{
+	if (intRefDIAfterNextOp)
+		return false; // DI right after DI: apply this one now
+	intRefDIAfterNextOp = true;
+	return true;
+}
+
+static void intApplyDeferredDI()
+{
+	if (cpuRegs.CP0.n.Status.b._EDI || cpuRegs.CP0.n.Status.b.EXL ||
+		cpuRegs.CP0.n.Status.b.ERL || (cpuRegs.CP0.n.Status.b.KSU == 0))
+	{
+		cpuRegs.CP0.n.Status.b.EIE = 0;
+	}
+}
 
 void intEventTest();
 
@@ -217,7 +236,10 @@ static void execI()
 	cpuBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
 
 	const bool ref_test_after = std::exchange(intRefTestAfterNextOp, false);
+	const bool ref_di_after = std::exchange(intRefDIAfterNextOp, false);
 	opcode.interpret();
+	if (ref_di_after)
+		intApplyDeferredDI();
 	if (ref_test_after)
 		intEventTest();
 }

@@ -417,6 +417,8 @@ extern int cpuGetCycles(int interrupt);
 
 // ReferenceTiming debugging: ARMSX2_EE_BRANCH_TRACE=<file> records every taken
 // branch (target pc, leftover 1/8 cycles, cycle) in the interpreter and the recs.
+/// Interpreter, ReferenceTiming: defer a DI past the next instruction (false = apply it now).
+extern bool intDeferDI();
 extern bool EERefBranchTraceEnabled();
 extern void EERefTraceBranch(u32 pending);
 extern void _cpuEventTest_Shared();		// for internal use by the Dynarecs and Ints inside R5900:
