@@ -234,6 +234,18 @@ void C_LT() {
 void CFC1() {
 	if (!_Rt_) return;
 
+	if (EmuConfig.Cpu.Recompiler.ReferenceTiming)
+	{
+		// The recompilers' (hardware-like) result, so all of them and the
+		// interpreter agree: FCR31 with its always-zero bits cleared and its
+		// always-one bits set; FCR0 (revision) as stored.
+		if (_Fs_ >= 16)
+			cpuRegs.GPR.r[_Rt_].SD[0] = (s32)((fpuRegs.fprc[31] & 0x0083c078) | 0x01000001);
+		else
+			cpuRegs.GPR.r[_Rt_].SD[0] = (s32)fpuRegs.fprc[0];
+		return;
+	}
+
 	if (_Fs_ == 31)
 		cpuRegs.GPR.r[_Rt_].SD[0] = (s32)fpuRegs.fprc[31];	// force sign extension to 64 bit
 	else if (_Fs_ == 0)
