@@ -121,7 +121,7 @@ static void recBEQ_const()
 	if (g_cpuConstRegs[_Rs_].SD[0] == g_cpuConstRegs[_Rt_].SD[0])
 		branchTo = ((s32)_Imm_ * 4) + pc;
 	else
-		branchTo = pc + 4;
+		{ branchTo = pc + 4; g_eeRefExit = EERefExit::NotTaken; }
 
 	recompileNextInstruction(true, false);
 	SetBranchImm(branchTo);
@@ -160,6 +160,7 @@ static void recBEQ_process(int process)
 			recompileNextInstruction(true, false);
 		}
 
+		g_eeRefExit = EERefExit::NotTaken; // not taken
 		SetBranchImm(pc);
 	}
 }
@@ -185,7 +186,7 @@ static void recBNE_const()
 	if (g_cpuConstRegs[_Rs_].SD[0] != g_cpuConstRegs[_Rt_].SD[0])
 		branchTo = ((s32)_Imm_ * 4) + pc;
 	else
-		branchTo = pc + 4;
+		{ branchTo = pc + 4; g_eeRefExit = EERefExit::NotTaken; }
 
 	recompileNextInstruction(true, false);
 	SetBranchImm(branchTo);
@@ -198,6 +199,7 @@ static void recBNE_process(int process)
 	if (_Rs_ == _Rt_)
 	{
 		recompileNextInstruction(true, false);
+		g_eeRefExit = EERefExit::NotTaken; // not taken
 		SetBranchImm(pc);
 		return;
 	}
@@ -224,6 +226,7 @@ static void recBNE_process(int process)
 		recompileNextInstruction(true, false);
 	}
 
+	g_eeRefExit = EERefExit::NotTaken; // not taken
 	SetBranchImm(pc);
 }
 
@@ -250,6 +253,7 @@ static void recBEQL_const()
 	}
 	else
 	{
+		g_eeRefExit = EERefExit::NotTaken; // not taken
 		SetBranchImm(pc + 4);
 	}
 }
@@ -266,6 +270,7 @@ static void recBEQL_process(int process)
 	x86SetJ32(j32Ptr[0]);
 
 	LoadBranchState();
+	g_eeRefExit = EERefExit::NotTaken; // not taken
 	SetBranchImm(pc);
 }
 
@@ -292,6 +297,7 @@ static void recBNEL_const()
 	}
 	else
 	{
+		g_eeRefExit = EERefExit::NotTaken; // not taken
 		SetBranchImm(pc + 4);
 	}
 }
@@ -303,6 +309,7 @@ static void recBNEL_process(int process)
 	recSetBranchEQ(0, process);
 
 	SaveBranchState();
+	g_eeRefExit = EERefExit::NotTaken; // not taken
 	SetBranchImm(pc + 4);
 
 	x86SetJ32(j32Ptr[0]);
@@ -359,7 +366,7 @@ void recBLTZAL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] < 0))
-			branchTo = pc + 4;
+			{ branchTo = pc + 4; g_eeRefExit = EERefExit::NoTest; }
 
 		recompileNextInstruction(true, false);
 		SetBranchImm(branchTo);
@@ -388,6 +395,7 @@ void recBLTZAL()
 		recompileNextInstruction(true, false);
 	}
 
+	g_eeRefExit = EERefExit::NoTest; // not taken
 	SetBranchImm(pc);
 }
 
@@ -408,7 +416,7 @@ void recBGEZAL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] >= 0))
-			branchTo = pc + 4;
+			{ branchTo = pc + 4; g_eeRefExit = EERefExit::NoTest; }
 
 		recompileNextInstruction(true, false);
 		SetBranchImm(branchTo);
@@ -437,6 +445,7 @@ void recBGEZAL()
 		recompileNextInstruction(true, false);
 	}
 
+	g_eeRefExit = EERefExit::NoTest; // not taken
 	SetBranchImm(pc);
 }
 
@@ -457,6 +466,7 @@ void recBLTZALL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] < 0))
+			g_eeRefExit = EERefExit::NotTaken; // not taken
 			SetBranchImm(pc + 4);
 		else
 		{
@@ -475,6 +485,7 @@ void recBLTZALL()
 	x86SetJ32(j32Ptr[0]);
 
 	LoadBranchState();
+	g_eeRefExit = EERefExit::NotTaken; // not taken
 	SetBranchImm(pc);
 }
 
@@ -495,6 +506,7 @@ void recBGEZALL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] >= 0))
+			g_eeRefExit = EERefExit::NotTaken; // not taken
 			SetBranchImm(pc + 4);
 		else
 		{
@@ -513,6 +525,7 @@ void recBGEZALL()
 	x86SetJ32(j32Ptr[0]);
 
 	LoadBranchState();
+	g_eeRefExit = EERefExit::NotTaken; // not taken
 	SetBranchImm(pc);
 }
 
@@ -527,7 +540,7 @@ void recBLEZ()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] <= 0))
-			branchTo = pc + 4;
+			{ branchTo = pc + 4; g_eeRefExit = EERefExit::NoTest; }
 
 		recompileNextInstruction(true, false);
 		SetBranchImm(branchTo);
@@ -563,6 +576,7 @@ void recBLEZ()
 		recompileNextInstruction(true, false);
 	}
 
+	g_eeRefExit = EERefExit::NoTest; // not taken
 	SetBranchImm(pc);
 }
 
@@ -576,7 +590,7 @@ void recBGTZ()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] > 0))
-			branchTo = pc + 4;
+			{ branchTo = pc + 4; g_eeRefExit = EERefExit::NoTest; }
 
 		recompileNextInstruction(true, false);
 		SetBranchImm(branchTo);
@@ -612,6 +626,7 @@ void recBGTZ()
 		recompileNextInstruction(true, false);
 	}
 
+	g_eeRefExit = EERefExit::NoTest; // not taken
 	SetBranchImm(pc);
 }
 
@@ -625,7 +640,7 @@ void recBLTZ()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] < 0))
-			branchTo = pc + 4;
+			{ branchTo = pc + 4; g_eeRefExit = EERefExit::NoTest; }
 
 		recompileNextInstruction(true, false);
 		SetBranchImm(branchTo);
@@ -654,6 +669,7 @@ void recBLTZ()
 		recompileNextInstruction(true, false);
 	}
 
+	g_eeRefExit = EERefExit::NoTest; // not taken
 	SetBranchImm(pc);
 }
 
@@ -667,7 +683,7 @@ void recBGEZ()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] >= 0))
-			branchTo = pc + 4;
+			{ branchTo = pc + 4; g_eeRefExit = EERefExit::NoTest; }
 
 		recompileNextInstruction(true, false);
 		SetBranchImm(branchTo);
@@ -697,6 +713,7 @@ void recBGEZ()
 		recompileNextInstruction(true, false);
 	}
 
+	g_eeRefExit = EERefExit::NoTest; // not taken
 	SetBranchImm(pc);
 }
 
@@ -710,6 +727,7 @@ void recBLTZL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] < 0))
+			g_eeRefExit = EERefExit::NotTaken; // not taken
 			SetBranchImm(pc + 4);
 		else
 		{
@@ -729,6 +747,7 @@ void recBLTZL()
 	x86SetJ32(j32Ptr[0]);
 
 	LoadBranchState();
+	g_eeRefExit = EERefExit::NotTaken; // not taken
 	SetBranchImm(pc);
 }
 
@@ -743,6 +762,7 @@ void recBGEZL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] >= 0))
+			g_eeRefExit = EERefExit::NotTaken; // not taken
 			SetBranchImm(pc + 4);
 		else
 		{
@@ -762,6 +782,7 @@ void recBGEZL()
 	x86SetJ32(j32Ptr[0]);
 
 	LoadBranchState();
+	g_eeRefExit = EERefExit::NotTaken; // not taken
 	SetBranchImm(pc);
 }
 
@@ -782,6 +803,7 @@ void recBLEZL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] <= 0))
+			g_eeRefExit = EERefExit::NotTaken; // not taken
 			SetBranchImm(pc + 4);
 		else
 		{
@@ -808,6 +830,7 @@ void recBLEZL()
 	x86SetJ32(j32Ptr[0]);
 
 	LoadBranchState();
+	g_eeRefExit = EERefExit::NotTaken; // not taken
 	SetBranchImm(pc);
 }
 
@@ -821,6 +844,7 @@ void recBGTZL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] > 0))
+			g_eeRefExit = EERefExit::NotTaken; // not taken
 			SetBranchImm(pc + 4);
 		else
 		{
@@ -848,6 +872,7 @@ void recBGTZL()
 	x86SetJ32(j32Ptr[0]);
 
 	LoadBranchState();
+	g_eeRefExit = EERefExit::NotTaken; // not taken
 	SetBranchImm(pc);
 }
 

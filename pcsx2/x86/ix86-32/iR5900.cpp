@@ -55,6 +55,46 @@ alignas(16) static u32 hwLUT[_64kb];
 static __fi u32 HWADDR(u32 mem) { return hwLUT[mem >> 16] + mem; }
 
 u32 s_nBlockCycles = 0; // cycles of current block recompiling
+
+// ReferenceTiming: the EE recompiler follows the same timing model as the
+// interpreter in that mode (Interpreter.cpp), so different builds (x86-64,
+// ARM64) emulate identically:
+//  - each instruction adds its interpreter cost (1/8 cycles) to a running
+//    total, g_eeRefPending, that carries across blocks;
+//  - only a taken branch turns it into cycles (intUpdateCPUCycles' formula)
+//    and then tests for events if one is due; BEQ/BNE and likely branches
+//    that aren't taken test without advancing; other exits just accumulate;
+//  - code that reads the cycle count mid-block sees the count as of the last
+//    taken branch (scaleblockcycles_clear() returns 0);
+//  - no idle-loop/timeout-loop skipping, FlushCache shortcut, MPEG skip,
+//    forced event tests after ERET/EI etc., or counter-read event test.
+bool g_eeRefTiming = false;
+EERefExit g_eeRefExit = EERefExit::Taken;
+static u32 g_eeRefPending = 0;
+
+// The interpreter's intUpdateCPUCycles() on g_eeRefPending (other cycle rates).
+static void eeRefAdvanceCycles()
+{
+	const s8 cyclerate = EmuConfig.Speedhacks.EECycleRate;
+	const u32 pending = g_eeRefPending;
+	const bool lowcycles = (pending <= 40);
+	u32 scale_cycles = 0;
+	if (cyclerate == 0 || lowcycles || cyclerate < -99 || cyclerate > 3)
+		scale_cycles = pending >> 3;
+	else if (cyclerate > 1)
+		scale_cycles = pending >> (2 + cyclerate);
+	else if (cyclerate == 1)
+		scale_cycles = (pending >> 3) / 1.3f;
+	else if (cyclerate == -1)
+		scale_cycles = (pending <= 80 || pending > 168 ? 5 : 7) * pending / 32;
+	else
+		scale_cycles = ((5 + (-2 * (cyclerate + 1))) * pending) >> 5;
+	cpuRegs.cycle += (scale_cycles < 1) ? 1 : scale_cycles;
+	if (cyclerate > 1)
+		g_eeRefPending = pending & ((0x1 << (cyclerate + 2)) - 1);
+	else
+		g_eeRefPending = pending & 0x7;
+}
 bool s_nBlockInterlocked = false; // Block is VU0 interlocked
 u32 pc; // recompiler pc
 int g_branch; // set for branch
@@ -365,8 +405,11 @@ void recBranchCall(void (*func)())
 	// In order to make sure a branch test is performed, the nextBranchCycle is set
 	// to the current cpu cycle.
 
-	xMOV(rax, ptr64[&cpuRegs.cycle]);
-	xMOV(ptr64[&cpuRegs.nextEventCycle], rax);
+	if (!g_eeRefTiming)
+	{
+		xMOV(rax, ptr64[&cpuRegs.cycle]);
+		xMOV(ptr64[&cpuRegs.nextEventCycle], rax);
+	}
 
 	recCall(func);
 	g_branch = 2;
@@ -780,7 +823,7 @@ static void recExecute()
 void R5900::Dynarec::OpcodeImpl::recSYSCALL()
 {
 	EE::Profiler.EmitOp(eeOpcode::SYSCALL);
-	if (GPR_IS_CONST1(3))
+	if (GPR_IS_CONST1(3) && !g_eeRefTiming)
 	{
 		// If it's FlushCache or iFlushCache, we can skip it since we don't support cache in the JIT.
 		if (g_cpuConstRegs[3].UC[0] == 0x64 || g_cpuConstRegs[3].UC[0] == 0x68)
@@ -1337,6 +1380,9 @@ static u32 scaleblockcycles()
 }
 u32 scaleblockcycles_clear()
 {
+	if (g_eeRefTiming)
+		return 0; // the interpreter's clock only moves at taken branches
+
 	u32 scaled = scaleblockcycles_calculation();
 
 #if 0 // Enable this to get some runtime statistics about the scaling result in practice
@@ -1383,6 +1429,52 @@ u32 scaleblockcycles_clear()
 //   setting "g_branch = 2";
 static void iBranchTest(u32 newpc)
 {
+	if (g_eeRefTiming)
+	{
+		const EERefExit exit = std::exchange(g_eeRefExit, EERefExit::Taken);
+		if (s_nBlockCycles != 0)
+			xADD(ptr32[&g_eeRefPending], s_nBlockCycles);
+
+		if (exit == EERefExit::Taken)
+		{
+			if (EmuConfig.Speedhacks.EECycleRate == 0)
+			{
+				// cycle += max(1, pending >> 3); pending &= 7
+				xMOV(eax, ptr32[&g_eeRefPending]);
+				xMOV(ecx, eax);
+				xSHR(ecx, 3);
+				xMOV(edx, 1);
+				xTEST(ecx, ecx);
+				xCMOVE(ecx, edx);
+				xAND(eax, 7);
+				xMOV(ptr32[&g_eeRefPending], eax);
+				xADD(ptr64[&cpuRegs.cycle], rcx);
+			}
+			else
+			{
+				xFastCall((void*)eeRefAdvanceCycles);
+			}
+		}
+
+		if (exit == EERefExit::NoTest)
+		{
+			if (newpc == 0xffffffff)
+				xJMP((void*)DispatcherReg);
+			else
+				recBlocks.Link(HWADDR(newpc), xJcc32());
+			return;
+		}
+
+		xMOV(rax, ptr64[&cpuRegs.cycle]);
+		xSUB(rax, ptr64[&cpuRegs.nextEventCycle]);
+		if (newpc == 0xffffffff)
+			xJS(DispatcherReg);
+		else
+			recBlocks.Link(HWADDR(newpc), xJcc32(Jcc_Signed));
+		xJMP((void*)DispatcherEvent);
+		return;
+	}
+
 	// Check the Event scheduler if our "cycle target" has been reached.
 	// Equiv code to:
 	//    cpuRegs.cycle += blockcycles;
@@ -1844,7 +1936,8 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	if (cpuRegs.code == 0x00000000)
 	{
 		// Note: Tests on a ps2 suggested more like 5 cycles for a NOP. But there's many factors in this..
-		s_nBlockCycles += 9 * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
+		// (ReferenceTiming: the interpreter's cost, i.e. SLL's.)
+		s_nBlockCycles += (g_eeRefTiming ? opcode.cycles : 9) * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
 	}
 	else
 	{
@@ -2127,7 +2220,7 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 static bool skipMPEG_By_Pattern(u32 sPC)
 {
 
-	if (!CHECK_SKIPMPEGHACK)
+	if (!CHECK_SKIPMPEGHACK || g_eeRefTiming)
 		return 0;
 
 	// sceMpegIsEnd: lw reg, 0x40(a0); jr ra; lw v0, 0(reg)
@@ -2155,7 +2248,7 @@ static bool skipMPEG_By_Pattern(u32 sPC)
 
 static bool recSkipTimeoutLoop(s32 reg, bool is_timeout_loop)
 {
-	if (!EmuConfig.Speedhacks.WaitLoop || !is_timeout_loop)
+	if (!EmuConfig.Speedhacks.WaitLoop || !is_timeout_loop || g_eeRefTiming)
 		return false;
 
 	DevCon.WriteLn("[EE] Skipping timeout loop at 0x%08X -> 0x%08X", s_pCurBlockEx->startpc, s_nEndBlock);
@@ -2198,6 +2291,9 @@ static void recRecompile(const u32 startpc)
 {
 	u32 i = 0;
 	u32 willbranch3 = 0;
+
+	g_eeRefTiming = EmuConfig.Cpu.Recompiler.ReferenceTiming;
+	g_eeRefExit = EERefExit::Taken;
 
 	pxAssert(startpc);
 
@@ -2715,6 +2811,7 @@ StartRecomp:
 		// for actual branching instructions.
 
 		iFlushCall(FLUSH_EVERYTHING);
+		g_eeRefExit = EERefExit::NoTest; // not a branch (syscall, ERET, ...)
 		iBranchTest();
 	}
 	else
@@ -2734,7 +2831,12 @@ StartRecomp:
 			// performance reasons.
 
 			const int numinsts = (pc - startpc) / 4;
-			if (numinsts > 6)
+			if (g_eeRefTiming)
+			{
+				g_eeRefExit = EERefExit::NoTest; // a split, not a branch
+				SetBranchImm(pc);
+			}
+			else if (numinsts > 6)
 				SetBranchImm(pc);
 			else
 			{

@@ -23,6 +23,9 @@ static std::string disOut;
 static bool intExitExecution = false;
 static fastjmp_buf intJmpBuf;
 static u32 intLastBranchTo;
+// ReferenceTiming: a not-taken BEQ/BNE tests for events after its delay slot
+// (where the recompilers' block ends), not before it.
+static bool intRefTestAfterNextOp = false;
 
 void intEventTest();
 
@@ -213,7 +216,10 @@ static void execI()
 
 	cpuBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
 
+	const bool ref_test_after = std::exchange(intRefTestAfterNextOp, false);
 	opcode.interpret();
+	if (ref_test_after)
+		intEventTest();
 }
 
 static __fi void _doBranch_shared(u32 tar)
@@ -228,7 +234,7 @@ static __fi void _doBranch_shared(u32 tar)
 	{
 		if (Cpu == &intCpu)
 		{
-			if (intLastBranchTo == tar && EmuConfig.Speedhacks.WaitLoop)
+			if (intLastBranchTo == tar && EmuConfig.Speedhacks.WaitLoop && !EmuConfig.Cpu.Recompiler.ReferenceTiming)
 			{
 				intUpdateCPUCycles();
 				bool can_skip = true;
@@ -364,6 +370,8 @@ void BEQ()  // Branch if Rs == Rt
 {
 	if (cpuRegs.GPR.r[_Rs_].SD[0] == cpuRegs.GPR.r[_Rt_].SD[0])
 		doBranch(_BranchTarget_);
+	else if (EmuConfig.Cpu.Recompiler.ReferenceTiming)
+		intRefTestAfterNextOp = true;
 	else
 		intEventTest();
 }
@@ -372,6 +380,8 @@ void BNE()  // Branch if Rs != Rt
 {
 	if (cpuRegs.GPR.r[_Rs_].SD[0] != cpuRegs.GPR.r[_Rt_].SD[0])
 		doBranch(_BranchTarget_);
+	else if (EmuConfig.Cpu.Recompiler.ReferenceTiming)
+		intRefTestAfterNextOp = true;
 	else
 		intEventTest();
 }
@@ -587,6 +597,13 @@ static void intReset()
 
 void intEventTest()
 {
+	// ReferenceTiming (the cross-platform timing model, shared with the
+	// recompilers): events are only tested when one is due, as the recompilers
+	// do, instead of at every branch. Cycles still advance only at taken
+	// branches (intUpdateCPUCycles in doBranch).
+	if (EmuConfig.Cpu.Recompiler.ReferenceTiming && static_cast<s64>(cpuRegs.cycle - cpuRegs.nextEventCycle) < 0)
+		return;
+
 	// Perform counters, ints, and IOP updates:
 	_cpuEventTest_Shared();
 

@@ -16,6 +16,9 @@
 #include "Hardware.h"
 #include "IPU/IPUdma.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include "Elfheader.h"
 #include "CDVD/CDVD.h"
 #include "Patch.h"
@@ -358,8 +361,38 @@ static bool cpuIntsEnabled(int Interrupt)
 
 // Shared portion of the branch test, called from both the Interpreter
 // and the recompiler.  (moved here to help alleviate redundant code)
+// Determinism debugging: with ARMSX2_EE_TRACE=<file>, every EE event test writes
+// a 16-byte record (pc, cycles until the scheduled event, cycle), the same
+// format as ARMSX2_IOP_TRACE (compare-iop-trace.py reads both).
+// ARMSX2_EE_TRACE_MAX limits the number of records (default 4,000,000).
+static void EETraceEventTest()
+{
+	static std::FILE* const file = [] {
+		const char* path = std::getenv("ARMSX2_EE_TRACE");
+		return (path && *path) ? std::fopen(path, "wb") : nullptr;
+	}();
+	if (!file)
+		return;
+	static u64 left = [] {
+		const char* max = std::getenv("ARMSX2_EE_TRACE_MAX");
+		return (max && *max) ? std::strtoull(max, nullptr, 10) : 4000000ull;
+	}();
+	if (left == 0)
+		return;
+	struct
+	{
+		u32 pc;
+		s32 until_event;
+		u64 cycle;
+	} record = {cpuRegs.pc, static_cast<s32>(cpuRegs.nextEventCycle - cpuRegs.cycle), cpuRegs.cycle};
+	std::fwrite(&record, sizeof(record), 1, file);
+	if (--left == 0)
+		std::fflush(file);
+}
+
 __fi void _cpuEventTest_Shared()
 {
+	EETraceEventTest();
 	eeEventTestIsActive = true;
 	cpuRegs.nextEventCycle = cpuRegs.cycle + eeWaitCycles;
 	cpuRegs.lastEventCycle = cpuRegs.cycle;

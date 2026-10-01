@@ -19,6 +19,17 @@ extern u32 pc;             // recompiler pc
 extern int g_branch;       // set for branch
 extern u32 target;         // branch target
 extern u32 s_nBlockCycles; // cycles of current block recompiling
+
+// ReferenceTiming (cross-platform timing model, see iR5900.cpp): latched per
+// compiled block, and how the next SetBranchImm/SetBranchReg exit counts.
+extern bool g_eeRefTiming;
+enum class EERefExit : u8
+{
+	Taken, // a taken branch or jump: cycles advance, then test for events
+	NotTaken, // BEQ/BNE/likely branch not taken: test for events only
+	NoTest, // other branches not taken, block splits, syscalls, exceptions
+};
+extern EERefExit g_eeRefExit;
 extern bool s_nBlockInterlocked; // Current block has VU0 interlocking
 
 // x86 can use shorter displacement if it fits in an s8, so offset 144 bytes into the cpuRegs

@@ -47,6 +47,7 @@ void recDoBranchImm(u32 branchTo, u32* jmpSkip, bool isLikely, bool swappedDelay
 		}
 	}
 
+	g_eeRefExit = EERefExit::NoTest; // COP branch not taken: no event test (the interpreter's BC0F etc.)
 	SetBranchImm(pc); // start a new recompiled block.
 }
 
