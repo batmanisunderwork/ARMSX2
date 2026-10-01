@@ -364,6 +364,16 @@ static bool cpuIntsEnabled(int Interrupt)
 
 // Shared portion of the branch test, called from both the Interpreter
 // and the recompiler.  (moved here to help alleviate redundant code)
+// ARMSX2_EE_TRACE_FROM=<cycle>: the EE traces start at this cycle (to zoom in).
+static bool EETraceBeforeStart()
+{
+	static const u64 from = [] {
+		const char* v = std::getenv("ARMSX2_EE_TRACE_FROM");
+		return (v && *v) ? std::strtoull(v, nullptr, 10) : 0ull;
+	}();
+	return cpuRegs.cycle < from;
+}
+
 // Determinism debugging: with ARMSX2_EE_TRACE=<file>, every EE event test writes
 // a 16-byte record (pc, cycles until the scheduled event, cycle), the same
 // format as ARMSX2_IOP_TRACE (compare-iop-trace.py reads both).
@@ -374,7 +384,7 @@ static void EETraceEventTest()
 		const char* path = std::getenv("ARMSX2_EE_TRACE");
 		return (path && *path) ? std::fopen(path, "wb") : nullptr;
 	}();
-	if (!file)
+	if (!file || EETraceBeforeStart())
 		return;
 	static u64 left = [] {
 		const char* max = std::getenv("ARMSX2_EE_TRACE_MAX");
@@ -444,7 +454,7 @@ static void EERefTraceGPRs()
 		const char* path = std::getenv("ARMSX2_EE_GPR_TRACE");
 		return (path && *path) ? std::fopen(path, "wb") : nullptr;
 	}();
-	if (!file)
+	if (!file || EETraceBeforeStart())
 		return;
 	static u64 left = [] {
 		const char* max = std::getenv("ARMSX2_EE_TRACE_MAX");
@@ -483,7 +493,7 @@ void EERefTraceBranch(u32 pending)
 	EERefWatch();
 	EERefTraceGPRs();
 	std::FILE* const file = EERefBranchTraceFile();
-	if (!file)
+	if (!file || EETraceBeforeStart())
 		return;
 	static u64 left = [] {
 		const char* max = std::getenv("ARMSX2_EE_TRACE_MAX");
