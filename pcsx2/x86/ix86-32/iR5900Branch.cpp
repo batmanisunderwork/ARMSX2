@@ -466,8 +466,10 @@ void recBLTZALL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] < 0))
+		{
 			g_eeRefExit = EERefExit::NotTaken; // not taken
 			SetBranchImm(pc + 4);
+		}
 		else
 		{
 			recompileNextInstruction(true, false);
@@ -506,8 +508,10 @@ void recBGEZALL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] >= 0))
+		{
 			g_eeRefExit = EERefExit::NotTaken; // not taken
 			SetBranchImm(pc + 4);
+		}
 		else
 		{
 			recompileNextInstruction(true, false);
@@ -727,8 +731,10 @@ void recBLTZL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] < 0))
+		{
 			g_eeRefExit = EERefExit::NotTaken; // not taken
 			SetBranchImm(pc + 4);
+		}
 		else
 		{
 			recompileNextInstruction(true, false);
@@ -762,8 +768,10 @@ void recBGEZL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] >= 0))
+		{
 			g_eeRefExit = EERefExit::NotTaken; // not taken
 			SetBranchImm(pc + 4);
+		}
 		else
 		{
 			recompileNextInstruction(true, false);
@@ -803,8 +811,10 @@ void recBLEZL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] <= 0))
+		{
 			g_eeRefExit = EERefExit::NotTaken; // not taken
 			SetBranchImm(pc + 4);
+		}
 		else
 		{
 			recompileNextInstruction(true, false);
@@ -844,8 +854,10 @@ void recBGTZL()
 	if (GPR_IS_CONST1(_Rs_))
 	{
 		if (!(g_cpuConstRegs[_Rs_].SD[0] > 0))
+		{
 			g_eeRefExit = EERefExit::NotTaken; // not taken
 			SetBranchImm(pc + 4);
+		}
 		else
 		{
 			_clearNeededXMMregs();
