@@ -491,6 +491,14 @@ static void EERefTraceGPRs()
 void EERefTraceBranch(u32 pending)
 {
 	EERefWatch();
+	// ARMSX2_EE_TRACE_EVERY=N: the branch and GPR traces keep every N-th branch.
+	static const u64 every = [] {
+		const char* v = std::getenv("ARMSX2_EE_TRACE_EVERY");
+		return (v && *v) ? std::max<u64>(1, std::strtoull(v, nullptr, 10)) : 1ull;
+	}();
+	static u64 count = 0;
+	if (every > 1 && (count++ % every) != 0)
+		return;
 	EERefTraceGPRs();
 	std::FILE* const file = EERefBranchTraceFile();
 	if (!file || EETraceBeforeStart())
