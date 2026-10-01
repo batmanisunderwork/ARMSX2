@@ -529,6 +529,42 @@ static const a64::Register RSCRATCH = RSCRATCHADDR;
 static const a64::Register RSCRATCHW = RSCRATCHADDR.W();
 static const a64::Register RSCRATCH2W = RXVIXLSCRATCH.W();
 
+// --------------------------------------------------------------------------------------
+//  ReferenceTiming (EmuCore/CPU/Recompiler ReferenceTiming)
+// --------------------------------------------------------------------------------------
+// Follow the interpreter (R3000AInterpreter.cpp) cycle for cycle, like the x86 IOP
+// rec does (see x86/iR3000A.cpp), so ARM64 and x86-64 builds emulate identically:
+//  - only a *taken* branch ends the interpreter's block: event test, then charge the
+//    EE for the cycles since the previous taken branch, then check the timeslice.
+//    Blocks tell the loop whether they ended with one (s_iopRefTaken for native
+//    code, g_iopInterpTakenBranch for interpreter single-steps, whose doBranch has
+//    already run the event test);
+//  - memory and coprocessor helpers see the exact cycle count;
+//  - RFE doesn't call iopTestIntc (the interpreter doesn't).
+static bool s_refTiming = false; // latched per compiled block
+static u32 s_refCycleOffset = 0; // interpreter cycle offset of the op being compiled
+static u32 s_iopRefTaken = 0; // set by native code: the block ended with a taken branch
+
+// cycle += / -= s_refCycleOffset around a helper call. Clobbers x17 only.
+static void iopRefCycleAdjust(bool enter)
+{
+	if (!s_refTiming || s_refCycleOffset == 0)
+		return;
+	armAsm->Ldr(RSCRATCHADDR, a64::MemOperand(RESTATEPTR, IOP_CYCLE_OFFSET));
+	if (enter)
+		armAsm->Add(RSCRATCHADDR, RSCRATCHADDR, s_refCycleOffset);
+	else
+		armAsm->Sub(RSCRATCHADDR, RSCRATCHADDR, s_refCycleOffset);
+	armAsm->Str(RSCRATCHADDR, a64::MemOperand(RESTATEPTR, IOP_CYCLE_OFFSET));
+}
+
+// s_iopRefTaken = value (a W register). Clobbers x16.
+static void iopRefStoreTaken(const a64::Register& value_w)
+{
+	armMoveAddressToReg(RXVIXLSCRATCH, &s_iopRefTaken);
+	armAsm->Str(value_w, a64::MemOperand(RXVIXLSCRATCH));
+}
+
 static __fi a64::MemOperand iopGpr(u32 n) { return a64::MemOperand(RESTATEPTR, IOP_GPR_OFFSET(n)); }
 static __fi a64::MemOperand iopHi() { return a64::MemOperand(RESTATEPTR, IOP_HI_OFFSET); }
 static __fi a64::MemOperand iopLo() { return a64::MemOperand(RESTATEPTR, IOP_LO_OFFSET); }
@@ -1101,6 +1137,12 @@ static void iopSelectPc(u32 target, u32 fallthrough, a64::Condition cond)
 	armAsm->Mov(RSCRATCH2W, target);
 	armAsm->Csel(RSCRATCHW, RSCRATCH2W, RSCRATCHW, cond);
 	iopWritePcReg(RSCRATCHW);
+	if (s_refTiming)
+	{
+		// Flags are still those of the compare.
+		armAsm->Cset(RSCRATCHW, cond);
+		iopRefStoreTaken(RSCRATCHW);
+	}
 }
 
 // Compare signed 32-bit GPR[rs] against zero and select pc.
@@ -1126,6 +1168,12 @@ static bool recEmitIopBranch(u32 op, u32 branchpc)
 	const u32 btarget = delaypc + (static_cast<u32>(static_cast<s32>(static_cast<s16>(op))) << 2);
 	const u32 fallthrough = branchpc + 8;
 	const u32 linkpc = branchpc + 8;
+
+	if (s_refTiming && (opcode == 0x02 || opcode == 0x03 || (opcode == 0x00 && (funct == 0x08 || funct == 0x09))))
+	{
+		armAsm->Mov(RSCRATCHW, 1); // jumps are always taken
+		iopRefStoreTaken(RSCRATCHW);
+	}
 
 	switch (opcode)
 	{
@@ -1201,7 +1249,35 @@ static bool recIsHandledBranch(u32 op)
 // handled it, false to fall back to single-stepping it through the interpreter. Control-
 // flow ops are handled separately (recEmitIopBranch); coprocessor ops return false for now
 // — they end the native run and are interpreted (the interpreter handles delay slots).
+static bool recTranslateOpImpl(u32 op);
+
+// Ops whose native generator calls a helper that can read the cycle counter (memory
+// access, coprocessors). Exactly the opcodes recTranslateOpImpl handles that way.
+static bool iopOpCallsHelper(u32 op)
+{
+	switch (op >> 26)
+	{
+		case 0x10: case 0x12: case 0x32: case 0x3A:
+		case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x25: case 0x26:
+		case 0x28: case 0x29: case 0x2A: case 0x2B: case 0x2E:
+			return true;
+		default:
+			return false;
+	}
+}
+
 static bool recTranslateOp(u32 op)
+{
+	if (!s_refTiming || !iopOpCallsHelper(op))
+		return recTranslateOpImpl(op);
+	iopRefCycleAdjust(true);
+	const bool handled = recTranslateOpImpl(op);
+	pxAssert(handled);
+	iopRefCycleAdjust(false);
+	return handled;
+}
+
+static bool recTranslateOpImpl(u32 op)
 {
 	const u32 opcode = op >> 26;
 	const u32 rs = (op >> 21) & 0x1f;
@@ -1276,7 +1352,7 @@ static bool recTranslateOp(u32 op)
 		// no block break). None write psxRegs.pc.
 		case 0x10: // COP0: MFC0/CFC0/MTC0/CTC0/RFE (psxCOP0 dispatches on rs)
 			recEmitInterpInline(op);
-			if (rs == 0x10) // RFE: raise any pending IOP interrupts (matches x86 rpsxRFE)
+			if (rs == 0x10 && !s_refTiming) // RFE: raise any pending IOP interrupts (matches x86 rpsxRFE)
 				armEmitCall(reinterpret_cast<const void*>(&iopTestIntc));
 			return true;
 		case 0x12: // COP2: GTE ops + MFC2/CFC2/MTC2/CTC2 (psxCOP2 dispatches on funct)
@@ -1297,7 +1373,11 @@ static bool recTranslateOp(u32 op)
 static void recEmitOp(u32 op)
 {
 	if (!recTranslateOp(op))
+	{
+		iopRefCycleAdjust(true);
 		recEmitInterpInline(op);
+		iopRefCycleAdjust(false);
+	}
 }
 
 // --------------------------------------------------------------------------------------
@@ -1329,6 +1409,7 @@ static void recRecompile(u32 startpc)
 	u32 block_cycles = 0;
 	u32 compiled = 0;
 	bool interp_step = false;
+	s_refTiming = EmuConfig.Cpu.Recompiler.ReferenceTiming;
 
 	// @@IOP_BLOCKLINK@@ Single statically-known successor PC for direct-B tail linking.
 	// Set only when the block ends with exactly one compile-time-constant next PC:
@@ -1372,6 +1453,7 @@ static void recRecompile(u32 startpc)
 			// Emit the branch effect (writes psxRegs.pc + any link), then the delay slot.
 			// The block ends here; the dispatcher re-reads psxRegs.pc for the next block.
 			recEmitIopBranch(op, pc);
+			s_refCycleOffset = block_cycles + 2; // the interpreter counts the branch, then the delay slot
 			recEmitOp(delay_op);
 			block_cycles += 2; // branch + delay slot, 1 cycle each (R3000A is 1 cycle/op)
 
@@ -1387,6 +1469,7 @@ static void recRecompile(u32 startpc)
 			break;
 		}
 
+		s_refCycleOffset = block_cycles + 1; // execI counts an op before running it
 		if (recTranslateOp(op))
 		{
 			block_cycles++;
@@ -1506,8 +1589,97 @@ static __fi void iopAddEECycles(u32 cycles)
 	psxRegs.iopCycleEECarry = t % cdenom;
 }
 
+// ReferenceTiming: the same structure as the interpreter's intExecuteBlock. Blocks
+// run until one ends with a taken branch (native: s_iopRefTaken, then the event test
+// here; interpreter single-step: g_iopInterpTakenBranch, its doBranch already ran the
+// event test); then the EE is charged for the cycles since the previous taken branch
+// and the timeslice is checked.
+static s32 recExecuteBlockReference(s32 eeCycles)
+{
+	psxRegs.iopBreak = 0;
+	psxRegs.iopCycleEE = eeCycles;
+
+	iopRecExecuting = true;
+
+	u32 stop_poll = 0;
+	bool stop = false;
+	while (psxRegs.iopCycleEE > 0 && !stop)
+	{
+		const u64 lastIOPCycle = psxRegs.cycle;
+
+		if ((psxHu32(HW_ICFG) & 8) &&
+			((psxRegs.pc & 0x1fffffffU) == 0xa0 || (psxRegs.pc & 0x1fffffffU) == 0xb0 ||
+				(psxRegs.pc & 0x1fffffffU) == 0xc0))
+		{
+			psxBiosCall();
+		}
+
+		for (;;)
+		{
+			if ((stop_poll++ & 63u) == 0)
+			{
+				const VMState st = VMManager::GetState();
+				if (st == VMState::Stopping || st == VMState::Shutdown)
+				{
+					stop = true;
+					break;
+				}
+			}
+
+			if (iopRecNeedsReset)
+				recResetRaw();
+
+			uptr fn = *recPtrToBlock(psxRegs.pc);
+			if (fn == IOP_UNMAPPED) [[unlikely]]
+			{
+				Console.Error("ARM64 IOP rec: execute on unmapped page (PC=0x%08x)", psxRegs.pc);
+				stop = true;
+				break;
+			}
+			if (fn == 0)
+			{
+				recRecompile(psxRegs.pc);
+				fn = *recPtrToBlock(psxRegs.pc);
+			}
+
+			s_iopRefTaken = 0;
+			g_iopInterpTakenBranch = false;
+			reinterpret_cast<void (*)()>(fn)();
+
+			if (s_iopRefTaken)
+			{
+				iopEventTest();
+				break;
+			}
+			if (g_iopInterpTakenBranch)
+				break;
+		}
+
+		const u32 cycles = static_cast<u32>(psxRegs.cycle - lastIOPCycle);
+		if (psxHu32(HW_ICFG) & (1 << 3))
+		{
+			const u32 cnum = 1280; // PS2CLK / gcd(PS2CLK, PSXCLK)
+			const u32 cdenom = 147; // PSXCLK / gcd
+			const u32 t = cnum * cycles + psxRegs.iopCycleEECarry;
+			psxRegs.iopCycleEE -= t / cdenom;
+			psxRegs.iopCycleEECarry = t % cdenom;
+		}
+		else
+		{
+			psxRegs.iopCycleEE -= cycles * 8;
+		}
+	}
+
+	iopRecExecuting = false;
+
+	return psxRegs.iopBreak + psxRegs.iopCycleEE;
+}
+
 static s32 recExecuteBlock(s32 eeCycles)
 {
+	if (EmuConfig.Cpu.Recompiler.ReferenceTiming)
+		return recExecuteBlockReference(eeCycles);
+
 	psxRegs.iopBreak = 0;
 	psxRegs.iopCycleEE = eeCycles;
 

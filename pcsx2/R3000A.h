@@ -196,6 +196,8 @@ extern void iopEventTest();
 // Single IOP interpreter step (execI wrapper); consumed by the arm64 IOP recompiler's
 // interpreter-fallback path. Defined in R3000AInterpreter.cpp.
 extern void iopExecuteOneInst();
+/// Set by iopExecuteOneInst(): the instruction was a taken branch.
+extern bool g_iopInterpTakenBranch;
 
 int psxIsBreakpointNeeded(u32 addr);
 int psxIsMemcheckNeeded(u32 pc);

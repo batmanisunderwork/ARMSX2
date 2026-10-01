@@ -268,9 +268,16 @@ static void doBranch(s32 tar) {
 // delay slot, redirects pc and runs the IOP event test, exactly as in intExecuteBlock.
 // It must NOT end the IOP timeslice (that is driven by the rec's recExecuteBlock loop
 // via iopCycleEE).
+bool g_iopInterpTakenBranch = false;
+
 void iopExecuteOneInst()
 {
+	branch2 = 0;
 	execI();
+	// A taken branch ran doBranch (delay slot, pc, event test). The ARM64
+	// recompiler's ReferenceTiming loop needs to know, to charge the EE and
+	// check the timeslice there like intExecuteBlock.
+	g_iopInterpTakenBranch = branch2;
 }
 
 static void intReserve() {
