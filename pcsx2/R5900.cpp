@@ -16,8 +16,11 @@
 #include "Hardware.h"
 #include "IPU/IPUdma.h"
 
+#include "Memory.h"
+
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "Elfheader.h"
 #include "CDVD/CDVD.h"
@@ -404,8 +407,37 @@ bool EERefBranchTraceEnabled()
 	return EERefBranchTraceFile() != nullptr;
 }
 
+// With ARMSX2_EE_WATCH=<hex EE RAM address> (and the branch trace on), log every
+// change of that 32-bit word, checked at each taken branch, to
+// ARMSX2_EE_WATCH_LOG (default: stderr).
+static void EERefWatch()
+{
+	static const u32 addr = [] {
+		const char* v = std::getenv("ARMSX2_EE_WATCH");
+		return (v && *v) ? static_cast<u32>(std::strtoul(v, nullptr, 16)) & (Ps2MemSize::MainRam - 4) : 0xFFFFFFFFu;
+	}();
+	if (addr == 0xFFFFFFFFu)
+		return;
+	static std::FILE* const log = [] {
+		const char* path = std::getenv("ARMSX2_EE_WATCH_LOG");
+		std::FILE* f = (path && *path) ? std::fopen(path, "w") : nullptr;
+		return f ? f : stderr;
+	}();
+	static u32 last = 0;
+	u32 value;
+	std::memcpy(&value, eeMem->Main + addr, sizeof(value));
+	if (value != last)
+	{
+		std::fprintf(log, "word %08x: %08x -> %08x at branch to %08x, cycle %llu\n", addr, last, value, cpuRegs.pc,
+			static_cast<unsigned long long>(cpuRegs.cycle));
+		std::fflush(log);
+		last = value;
+	}
+}
+
 void EERefTraceBranch(u32 pending)
 {
+	EERefWatch();
 	std::FILE* const file = EERefBranchTraceFile();
 	if (!file)
 		return;
