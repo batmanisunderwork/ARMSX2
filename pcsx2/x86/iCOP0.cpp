@@ -212,6 +212,8 @@ void recMTC0()
 
 			case 16:
 				iFlushCall(FLUSH_INTERPRETER);
+				if (g_eeRefTiming)
+					eeRefAccumulateBlockCycles(true); // costs so far use the old DIE bit
 				xFastCall((void*)WriteCP0Config, g_cpuConstRegs[_Rt_].UL[0]);
 				break;
 
@@ -280,6 +282,8 @@ void recMTC0()
 			case 16:
 				_eeMoveGPRtoR(arg1reg, _Rt_);
 				iFlushCall(FLUSH_INTERPRETER);
+				if (g_eeRefTiming)
+					eeRefAccumulateBlockCycles(true); // costs so far use the old DIE bit
 				xFastCall((void*)WriteCP0Config);
 				break;
 

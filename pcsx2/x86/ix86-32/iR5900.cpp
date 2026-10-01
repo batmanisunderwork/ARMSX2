@@ -72,6 +72,22 @@ bool g_eeRefTiming = false;
 EERefExit g_eeRefExit = EERefExit::Taken;
 static u32 g_eeRefPending = 0;
 
+void eeRefAccumulateBlockCycles(bool restart)
+{
+	if (s_nBlockCycles == 0)
+		return;
+	// s_nBlockCycles holds base costs under ReferenceTiming; doubled while
+	// Config.DIE (bit 18) is clear, like the interpreter's execI.
+	xMOV(eax, s_nBlockCycles);
+	xTEST(ptr32[&cpuRegs.CP0.n.Config], 1 << 18);
+	xForwardJNZ8 die_set;
+	xADD(eax, eax);
+	die_set.SetTarget();
+	xADD(ptr32[&g_eeRefPending], eax);
+	if (restart)
+		s_nBlockCycles = 0;
+}
+
 // The interpreter's intUpdateCPUCycles() on g_eeRefPending (other cycle rates).
 static void eeRefAdvanceCycles()
 {
@@ -1432,8 +1448,7 @@ static void iBranchTest(u32 newpc)
 	if (g_eeRefTiming)
 	{
 		const EERefExit exit = std::exchange(g_eeRefExit, EERefExit::Taken);
-		if (s_nBlockCycles != 0)
-			xADD(ptr32[&g_eeRefPending], s_nBlockCycles);
+		eeRefAccumulateBlockCycles(false);
 
 		if (exit == EERefExit::Taken)
 		{
@@ -1937,12 +1952,13 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	{
 		// Note: Tests on a ps2 suggested more like 5 cycles for a NOP. But there's many factors in this..
 		// (ReferenceTiming: the interpreter's cost, i.e. SLL's.)
-		s_nBlockCycles += (g_eeRefTiming ? opcode.cycles : 9) * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
+		// (ReferenceTiming: the interpreter's cost, i.e. SLL's; the DIE factor is applied at run time.)
+		s_nBlockCycles += g_eeRefTiming ? opcode.cycles : 9 * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
 	}
 	else
 	{
 		//If the COP0 DIE bit is disabled, cycles should be doubled.
-		s_nBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
+		s_nBlockCycles += g_eeRefTiming ? opcode.cycles : opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
 		opcode.recompile();
 	}
 

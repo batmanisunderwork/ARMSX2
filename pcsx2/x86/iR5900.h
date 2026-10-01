@@ -30,6 +30,11 @@ enum class EERefExit : u8
 	NoTest, // other branches not taken, block splits, syscalls, exceptions
 };
 extern EERefExit g_eeRefExit;
+// ReferenceTiming: emit g_eeRefPending += s_nBlockCycles x (2 - Config.DIE),
+// with DIE read at run time (the interpreter applies the current Config to
+// every instruction). With `restart`, the block's count starts over (used
+// before a Config write). Clobbers eax only.
+void eeRefAccumulateBlockCycles(bool restart);
 extern bool s_nBlockInterlocked; // Current block has VU0 interlocking
 
 // x86 can use shorter displacement if it fits in an s8, so offset 144 bytes into the cpuRegs
