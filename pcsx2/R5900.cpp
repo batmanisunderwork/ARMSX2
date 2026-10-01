@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include "Elfheader.h"
 #include "CDVD/CDVD.h"
@@ -489,9 +490,41 @@ static void EERefTraceGPRs()
 		std::fflush(file);
 }
 
+// ARMSX2_EE_REGS_DUMP=<cycle>,<file>: at the first taken branch at or after that
+// cycle, write the EE registers (cpuRegs, then fpuRegs) to the file, once.
+static void EERefDumpRegs()
+{
+	static u64 at = ~0ull;
+	static std::string path;
+	static bool init = false;
+	if (!init)
+	{
+		init = true;
+		if (const char* v = std::getenv("ARMSX2_EE_REGS_DUMP"); v && *v)
+		{
+			const char* comma = std::strchr(v, ',');
+			if (comma)
+			{
+				at = std::strtoull(v, nullptr, 10);
+				path = comma + 1;
+			}
+		}
+	}
+	if (cpuRegs.cycle < at)
+		return;
+	at = ~0ull;
+	if (std::FILE* f = std::fopen(path.c_str(), "wb"))
+	{
+		std::fwrite(&cpuRegs, sizeof(cpuRegs), 1, f);
+		std::fwrite(&fpuRegs, sizeof(fpuRegs), 1, f);
+		std::fclose(f);
+	}
+}
+
 void EERefTraceBranch(u32 pending)
 {
 	EERefWatch();
+	EERefDumpRegs();
 	// ARMSX2_EE_TRACE_EVERY=N: the branch and GPR traces keep every N-th branch.
 	static const u64 every = [] {
 		const char* v = std::getenv("ARMSX2_EE_TRACE_EVERY");
