@@ -1555,7 +1555,7 @@ static void rpsxBEQ_const()
 	if (g_psxConstRegs[_Rs_] == g_psxConstRegs[_Rt_])
 		branchTo = ((s32)_Imm_ * 4) + psxpc;
 	else
-		branchTo = psxpc + 4;
+		{ branchTo = psxpc + 4; g_psxBranchNotTaken = true; }
 
 	psxRecompileNextInstruction(true, false);
 	psxSetBranchImm(branchTo);
@@ -1594,6 +1594,7 @@ static void rpsxBEQ_process(int process)
 			psxRecompileNextInstruction(true, false);
 		}
 
+		g_psxBranchNotTaken = true; // fall-through: the branch is not taken
 		psxSetBranchImm(psxpc);
 	}
 }
@@ -1619,7 +1620,7 @@ static void rpsxBNE_const()
 	if (g_psxConstRegs[_Rs_] != g_psxConstRegs[_Rt_])
 		branchTo = ((s32)_Imm_ * 4) + psxpc;
 	else
-		branchTo = psxpc + 4;
+		{ branchTo = psxpc + 4; g_psxBranchNotTaken = true; }
 
 	psxRecompileNextInstruction(true, false);
 	psxSetBranchImm(branchTo);
@@ -1632,6 +1633,7 @@ static void rpsxBNE_process(int process)
 	if (_Rs_ == _Rt_)
 	{
 		psxRecompileNextInstruction(true, false);
+		g_psxBranchNotTaken = true; // fall-through: the branch is not taken
 		psxSetBranchImm(psxpc);
 		return;
 	}
@@ -1646,6 +1648,7 @@ static void rpsxBNE_process(int process)
 		psxRecompileNextInstruction(true, false);
 	}
 
+	g_psxBranchNotTaken = true; // fall-through: the branch is not taken
 	psxSetBranchImm(psxpc);
 
 	x86SetJ32A(s_pbranchjmp);
@@ -1682,7 +1685,7 @@ static void rpsxBLTZ()
 	if (PSX_IS_CONST1(_Rs_))
 	{
 		if ((int)g_psxConstRegs[_Rs_] >= 0)
-			branchTo = psxpc + 4;
+			{ branchTo = psxpc + 4; g_psxBranchNotTaken = true; }
 
 		psxRecompileNextInstruction(true, false);
 		psxSetBranchImm(branchTo);
@@ -1706,6 +1709,7 @@ static void rpsxBLTZ()
 		psxRecompileNextInstruction(true, false);
 	}
 
+	g_psxBranchNotTaken = true; // fall-through: the branch is not taken
 	psxSetBranchImm(psxpc);
 
 	x86SetJ32A(pjmp);
@@ -1729,7 +1733,7 @@ static void rpsxBGEZ()
 	if (PSX_IS_CONST1(_Rs_))
 	{
 		if ((int)g_psxConstRegs[_Rs_] < 0)
-			branchTo = psxpc + 4;
+			{ branchTo = psxpc + 4; g_psxBranchNotTaken = true; }
 
 		psxRecompileNextInstruction(true, false);
 		psxSetBranchImm(branchTo);
@@ -1753,6 +1757,7 @@ static void rpsxBGEZ()
 		psxRecompileNextInstruction(true, false);
 	}
 
+	g_psxBranchNotTaken = true; // fall-through: the branch is not taken
 	psxSetBranchImm(psxpc);
 
 	x86SetJ32A(pjmp);
@@ -1782,7 +1787,7 @@ static void rpsxBLTZAL()
 	if (PSX_IS_CONST1(_Rs_))
 	{
 		if ((int)g_psxConstRegs[_Rs_] >= 0)
-			branchTo = psxpc + 4;
+			{ branchTo = psxpc + 4; g_psxBranchNotTaken = true; }
 
 		psxRecompileNextInstruction(true, false);
 		psxSetBranchImm(branchTo);
@@ -1806,6 +1811,7 @@ static void rpsxBLTZAL()
 		psxRecompileNextInstruction(true, false);
 	}
 
+	g_psxBranchNotTaken = true; // fall-through: the branch is not taken
 	psxSetBranchImm(psxpc);
 
 	x86SetJ32A(pjmp);
@@ -1834,7 +1840,7 @@ static void rpsxBGEZAL()
 	if (PSX_IS_CONST1(_Rs_))
 	{
 		if ((int)g_psxConstRegs[_Rs_] < 0)
-			branchTo = psxpc + 4;
+			{ branchTo = psxpc + 4; g_psxBranchNotTaken = true; }
 
 		psxRecompileNextInstruction(true, false);
 		psxSetBranchImm(branchTo);
@@ -1858,6 +1864,7 @@ static void rpsxBGEZAL()
 		psxRecompileNextInstruction(true, false);
 	}
 
+	g_psxBranchNotTaken = true; // fall-through: the branch is not taken
 	psxSetBranchImm(psxpc);
 
 	x86SetJ32A(pjmp);
@@ -1882,7 +1889,7 @@ static void rpsxBLEZ()
 	if (PSX_IS_CONST1(_Rs_))
 	{
 		if ((int)g_psxConstRegs[_Rs_] > 0)
-			branchTo = psxpc + 4;
+			{ branchTo = psxpc + 4; g_psxBranchNotTaken = true; }
 
 		psxRecompileNextInstruction(true, false);
 		psxSetBranchImm(branchTo);
@@ -1906,6 +1913,7 @@ static void rpsxBLEZ()
 		psxRecompileNextInstruction(true, false);
 	}
 
+	g_psxBranchNotTaken = true; // fall-through: the branch is not taken
 	psxSetBranchImm(psxpc);
 
 	x86SetJ32A(pjmp);
@@ -1931,7 +1939,7 @@ static void rpsxBGTZ()
 	if (PSX_IS_CONST1(_Rs_))
 	{
 		if ((int)g_psxConstRegs[_Rs_] <= 0)
-			branchTo = psxpc + 4;
+			{ branchTo = psxpc + 4; g_psxBranchNotTaken = true; }
 
 		psxRecompileNextInstruction(true, false);
 		psxSetBranchImm(branchTo);
@@ -1955,6 +1963,7 @@ static void rpsxBGTZ()
 		psxRecompileNextInstruction(true, false);
 	}
 
+	g_psxBranchNotTaken = true; // fall-through: the branch is not taken
 	psxSetBranchImm(psxpc);
 
 	x86SetJ32A(pjmp);

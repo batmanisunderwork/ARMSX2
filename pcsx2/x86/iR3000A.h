@@ -42,6 +42,9 @@ extern u32 g_iopCyclePenalty;
 /// EmuConfig.Cpu.Recompiler.ReferenceTiming, latched when a block is compiled:
 /// follow the interpreter's timing exactly (see iR3000A.cpp).
 extern bool g_psxRefTiming;
+/// Set before psxSetBranchImm() for the exit of a conditional branch that is
+/// not taken: the interpreter treats that as no branch at all.
+extern bool g_psxBranchNotTaken;
 
 /// With ReferenceTiming, wrap calls that can observe psxRegs.cycle (hardware
 /// registers, exceptions) so they see the interpreter's exact cycle.

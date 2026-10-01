@@ -63,6 +63,7 @@ u32 psxpc; // recompiler psxpc
 int psxbranch; // set for branch
 u32 g_iopCyclePenalty;
 bool g_psxRefTiming = false;
+bool g_psxBranchNotTaken = false;
 
 // ReferenceTiming: the interpreter (R3000AInterpreter.cpp) is the reference
 // every recompiler (x86-64 here, ARM64 in arm64/aR3000A.cpp) must match
@@ -1206,11 +1207,21 @@ void psxSetBranchImm(u32 imm)
 {
 	psxbranch = 1;
 	pxAssert(imm);
+	const bool not_taken = std::exchange(g_psxBranchNotTaken, false);
 
 	// end the current block
 	xMOV(ptr32[&psxRegs.pc], imm);
 	_psxFlushCall(FLUSH_EVERYTHING);
-	iPsxBranchTest(imm, imm <= psxpc);
+	if (g_psxRefTiming && not_taken)
+	{
+		// The interpreter only runs doBranch() (event test, end of its
+		// block) for a taken branch; a branch not taken just goes on.
+		xADD(ptr64[&psxRegs.cycle], s_psxBlockCycles);
+	}
+	else
+	{
+		iPsxBranchTest(imm, imm <= psxpc);
+	}
 
 	recBlocks.Link(HWADDR(imm), xJcc32());
 }
