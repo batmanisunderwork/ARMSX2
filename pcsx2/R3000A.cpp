@@ -15,6 +15,9 @@
 #include "CDVD/Ps1CD.h"
 #include "CDVD/CDVD.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 using namespace R3000A;
 
 R3000Acpu *psxCpu;
@@ -204,8 +207,38 @@ static __fi void _psxTestInterrupts()
 	}
 }
 
+// Determinism debugging: with ARMSX2_IOP_TRACE=<file>, every IOP event test
+// writes a 16-byte record (pc, EE timeslice left, cycle) so the traces of two
+// runs (e.g. interpreter vs recompiler) can be compared record by record.
+// ARMSX2_IOP_TRACE_MAX limits the number of records (default 4,000,000).
+static void IopTraceEventTest()
+{
+	static std::FILE* const file = [] {
+		const char* path = std::getenv("ARMSX2_IOP_TRACE");
+		return (path && *path) ? std::fopen(path, "wb") : nullptr;
+	}();
+	if (!file)
+		return;
+	static u64 left = [] {
+		const char* max = std::getenv("ARMSX2_IOP_TRACE_MAX");
+		return (max && *max) ? std::strtoull(max, nullptr, 10) : 4000000ull;
+	}();
+	if (left == 0)
+		return;
+	struct
+	{
+		u32 pc;
+		s32 timeslice_left;
+		u64 cycle;
+	} record = {psxRegs.pc, psxRegs.iopCycleEE, psxRegs.cycle};
+	std::fwrite(&record, sizeof(record), 1, file);
+	if (--left == 0)
+		std::fflush(file);
+}
+
 __ri void iopEventTest()
 {
+	IopTraceEventTest();
 	psxRegs.iopNextEventCycle = psxRegs.cycle + iopWaitCycles;
 
 	if (psxTestCycle(psxNextStartCounter, psxNextDeltaCounter))

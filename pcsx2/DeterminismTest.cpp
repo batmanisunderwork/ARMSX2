@@ -135,6 +135,7 @@ namespace DeterminismTest
 		{
 			std::fclose(s_log);
 			s_log = nullptr;
+			std::fflush(nullptr); // other debug outputs (e.g. ARMSX2_IOP_TRACE)
 			std::_Exit(0);
 		}
 	}
