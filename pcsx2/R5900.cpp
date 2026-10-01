@@ -435,9 +435,50 @@ static void EERefWatch()
 	}
 }
 
+// With ARMSX2_EE_GPR_TRACE=<file> (and the branch trace on), every taken branch
+// also records a hash of the GPRs (low 64 bits) and HI/LO: 16 bytes (pc, hash,
+// cycle), to find the first block that computes something differently.
+static void EERefTraceGPRs()
+{
+	static std::FILE* const file = [] {
+		const char* path = std::getenv("ARMSX2_EE_GPR_TRACE");
+		return (path && *path) ? std::fopen(path, "wb") : nullptr;
+	}();
+	if (!file)
+		return;
+	static u64 left = [] {
+		const char* max = std::getenv("ARMSX2_EE_TRACE_MAX");
+		return (max && *max) ? std::strtoull(max, nullptr, 10) : 4000000ull;
+	}();
+	if (left == 0)
+		return;
+	u64 h = 1469598103934665603ull; // FNV-1a over the 64-bit values
+	auto mix = [&h](u64 v) {
+		for (int i = 0; i < 8; i++)
+		{
+			h ^= (v >> (i * 8)) & 0xff;
+			h *= 1099511628211ull;
+		}
+	};
+	for (int i = 0; i < 32; i++)
+		mix(cpuRegs.GPR.r[i].UD[0]);
+	mix(cpuRegs.HI.UD[0]);
+	mix(cpuRegs.LO.UD[0]);
+	struct
+	{
+		u32 pc;
+		u32 hash;
+		u64 cycle;
+	} record = {cpuRegs.pc, static_cast<u32>(h ^ (h >> 32)), cpuRegs.cycle};
+	std::fwrite(&record, sizeof(record), 1, file);
+	if (--left == 0)
+		std::fflush(file);
+}
+
 void EERefTraceBranch(u32 pending)
 {
 	EERefWatch();
+	EERefTraceGPRs();
 	std::FILE* const file = EERefBranchTraceFile();
 	if (!file)
 		return;
