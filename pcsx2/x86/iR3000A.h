@@ -39,6 +39,14 @@ void _psxMoveGPRtoM(uptr to, int fromgpr);
 extern u32 psxpc; // recompiler pc
 extern int psxbranch; // set for branch
 extern u32 g_iopCyclePenalty;
+/// EmuConfig.Cpu.Recompiler.ReferenceTiming, latched when a block is compiled:
+/// follow the interpreter's timing exactly (see iR3000A.cpp).
+extern bool g_psxRefTiming;
+
+/// With ReferenceTiming, wrap calls that can observe psxRegs.cycle (hardware
+/// registers, exceptions) so they see the interpreter's exact cycle.
+void psxRefCycleEnter();
+void psxRefCycleLeave();
 
 void psxSaveBranchState();
 void psxLoadBranchState();
@@ -112,7 +120,7 @@ int psxTryRenameReg(int to, int from, int fromx86, int other, int xmminfo);
 	void rpsx##fn(void) \
 	{ \
 		psxRecompileCodeConst3(rpsx##fn##_const, rpsx##fn##_consts, rpsx##fn##_constt, rpsx##fn##_, LOHI); \
-		g_iopCyclePenalty = cycles; \
+		g_iopCyclePenalty = g_psxRefTiming ? 0 : cycles; /* the interpreter has no penalty */ \
 	}
 
 // rd = rs op rt

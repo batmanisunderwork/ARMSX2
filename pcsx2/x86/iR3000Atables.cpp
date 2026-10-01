@@ -21,7 +21,9 @@ extern u32 g_psxMaxRecMem;
 	{ \
 		xMOV(ptr32[&psxRegs.code], (u32)psxRegs.code); \
 		_psxFlushCall(FLUSH_EVERYTHING); \
+		psxRefCycleEnter(); \
 		xFastCall((void*)(uptr)psx##f); \
+		psxRefCycleLeave(); \
 		PSX_DEL_CONST(_Rt_); \
 		/*	branch = 2; */ \
 	}
@@ -1089,6 +1091,7 @@ static void rpsxLoad(int size, bool sign)
 	xTEST(arg1regd, 0x10000000);
 	xForwardJZ8 is_ram_read;
 
+	psxRefCycleEnter(); // hardware registers may read the cycle counter
 	switch (size)
 	{
 		case 8:
@@ -1103,6 +1106,7 @@ static void rpsxLoad(int size, bool sign)
 
 			jNO_DEFAULT
 	}
+	psxRefCycleLeave();
 
 	if (_Rt_ == 0)
 	{
@@ -1194,7 +1198,9 @@ static void rpsxSB()
 	rpsxCalcAddressOperand();
 	rpsxCalcStoreOperand();
 	_psxFlushCall(FLUSH_FULLVTLB);
+	psxRefCycleEnter();
 	xFastCall((void*)iopMemWrite8);
+	psxRefCycleLeave();
 }
 
 static void rpsxSH()
@@ -1202,7 +1208,9 @@ static void rpsxSH()
 	rpsxCalcAddressOperand();
 	rpsxCalcStoreOperand();
 	_psxFlushCall(FLUSH_FULLVTLB);
+	psxRefCycleEnter();
 	xFastCall((void*)iopMemWrite16);
+	psxRefCycleLeave();
 }
 
 static void rpsxSW()
@@ -1218,7 +1226,9 @@ static void rpsxSW()
 	rpsxCalcAddressOperand();
 	rpsxCalcStoreOperand();
 	_psxFlushCall(FLUSH_FULLVTLB);
+	psxRefCycleEnter();
 	xFastCall((void*)iopMemWrite32);
+	psxRefCycleLeave();
 }
 
 //// SLL
@@ -2010,9 +2020,12 @@ static void rpsxRFE()
 	xMOV(ptr32[&psxRegs.CP0.n.Status], eax);
 
 	// Test the IOP's INTC status, so that any pending ints get raised.
-
-	_psxFlushCall(0);
-	xFastCall((void*)(uptr)&iopTestIntc);
+	// (The interpreter doesn't; it raises them at the next branch's event test.)
+	if (!g_psxRefTiming)
+	{
+		_psxFlushCall(0);
+		xFastCall((void*)(uptr)&iopTestIntc);
+	}
 }
 
 //// COP2

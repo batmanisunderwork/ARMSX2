@@ -62,6 +62,20 @@ static u8* recPtrEnd = nullptr;
 u32 psxpc; // recompiler psxpc
 int psxbranch; // set for branch
 u32 g_iopCyclePenalty;
+bool g_psxRefTiming = false;
+
+// ReferenceTiming: the interpreter (R3000AInterpreter.cpp) is the reference
+// every recompiler (x86-64 here, ARM64 in arm64/aR3000A.cpp) must match
+// cycle for cycle, so different builds emulate identically (cross-platform
+// netplay). The differences from normal recompiler timing:
+//  - at every branch: iopEventTest(), then charge the EE for the cycles since
+//    the previous branch, then end the timeslice if it ran out (normally the
+//    event test only runs when an event is due, after the timeslice check);
+//  - the EE is only charged at branches, not at block splits or exceptions;
+//  - no extra cycles for MULT/DIV, no idle-loop skipping, RFE doesn't poke
+//    the INTC;
+//  - calls that can read the cycle counter mid-block see the exact count.
+static u64 s_iopRefLastBranchCycle = 0;
 
 static EEINST* s_pInstCache = nullptr;
 static u32 s_nInstCacheSize = 0;
@@ -1053,6 +1067,15 @@ static __noinline s32 recExecuteBlock(s32 eeCycles)
 	psxRegs.iopBreak = 0;
 	psxRegs.iopCycleEE = eeCycles;
 
+	if (EmuConfig.Cpu.Recompiler.ReferenceTiming)
+	{
+		// Like the interpreter's loop: nothing runs without a timeslice, and
+		// the EE is charged from here on.
+		if (eeCycles <= 0)
+			return psxRegs.iopBreak + psxRegs.iopCycleEE;
+		s_iopRefLastBranchCycle = psxRegs.cycle;
+	}
+
 #ifdef PCSX2_DEVBUILD
 	//if (SysTrace.SIF.IsActive())
 	//	SysTrace.IOP.R3000A.Write("Switching to IOP CPU for %d cycles", eeCycles);
@@ -1184,6 +1207,41 @@ static __fi u32 psxScaleBlockCycles()
 	return s_psxBlockCycles;
 }
 
+void psxRefCycleEnter()
+{
+	if (g_psxRefTiming && s_psxBlockCycles != 0)
+		xADD(ptr64[&psxRegs.cycle], s_psxBlockCycles);
+}
+
+void psxRefCycleLeave()
+{
+	if (g_psxRefTiming && s_psxBlockCycles != 0)
+		xSUB(ptr64[&psxRegs.cycle], s_psxBlockCycles);
+}
+
+/// ReferenceTiming: what the interpreter does after every branch (doBranch,
+/// then intExecuteBlock's loop). Returns nonzero to end the timeslice.
+static int iopRefBranchTest()
+{
+	iopEventTest();
+
+	const u32 cycles = static_cast<u32>(psxRegs.cycle - s_iopRefLastBranchCycle);
+	s_iopRefLastBranchCycle = psxRegs.cycle;
+	if (psxHu32(HW_ICFG) & (1 << 3))
+	{
+		const u32 cnum = 1280; // PS2CLK / gcd(PS2CLK, PSXCLK)
+		const u32 cdenom = 147; // PSXCLK / gcd
+		const u32 t = cnum * cycles + psxRegs.iopCycleEECarry;
+		psxRegs.iopCycleEE -= t / cdenom;
+		psxRegs.iopCycleEECarry = t % cdenom;
+	}
+	else
+	{
+		psxRegs.iopCycleEE -= cycles * 8;
+	}
+	return psxRegs.iopCycleEE <= 0;
+}
+
 static void iPsxAddEECycles(u32 blockCycles)
 {
 	if (!(psxHu32(HW_ICFG) & (1 << 3))) [[likely]]
@@ -1212,6 +1270,20 @@ static void iPsxAddEECycles(u32 blockCycles)
 static void iPsxBranchTest(u32 newpc, u32 cpuBranch)
 {
 	u32 blockCycles = psxScaleBlockCycles();
+
+	if (g_psxRefTiming)
+	{
+		xADD(ptr64[&psxRegs.cycle], blockCycles);
+		xFastCall((void*)iopRefBranchTest);
+		xTEST(eax, eax);
+		xJNE(iopExitRecompiledCode);
+		if (newpc != 0xffffffff)
+		{
+			xCMP(ptr32[&psxRegs.pc], newpc);
+			xJNE(iopDispatcherReg);
+		}
+		return;
+	}
 
 	if (EmuConfig.Speedhacks.WaitLoop && s_nBlockFF && newpc == s_branchTo)
 	{
@@ -1289,13 +1361,16 @@ void rpsxSYSCALL()
 
 	//xMOV( ecx, 0x20 );			// exception code
 	//xMOV( edx, psxbranch==1 );	// branch delay slot?
+	psxRefCycleEnter();
 	xFastCall((void*)psxException, 0x20, psxbranch == 1);
+	psxRefCycleLeave();
 
 	xCMP(ptr32[&psxRegs.pc], psxpc - 4);
 	j8Ptr[0] = JE8(0);
 
 	xADD(ptr64[&psxRegs.cycle], psxScaleBlockCycles());
-	iPsxAddEECycles(psxScaleBlockCycles());
+	if (!g_psxRefTiming) // charged at the next branch instead
+		iPsxAddEECycles(psxScaleBlockCycles());
 	JMP32((uptr)iopDispatcherReg - ((uptr)x86Ptr + 5));
 
 	// jump target for skipping blockCycle updates
@@ -1312,12 +1387,15 @@ void rpsxBREAK()
 
 	//xMOV( ecx, 0x24 );			// exception code
 	//xMOV( edx, psxbranch==1 );	// branch delay slot?
+	psxRefCycleEnter();
 	xFastCall((void*)psxException, 0x24, psxbranch == 1);
+	psxRefCycleLeave();
 
 	xCMP(ptr32[&psxRegs.pc], psxpc - 4);
 	j8Ptr[0] = JE8(0);
 	xADD(ptr64[&psxRegs.cycle], psxScaleBlockCycles());
-	iPsxAddEECycles(psxScaleBlockCycles());
+	if (!g_psxRefTiming) // charged at the next branch instead
+		iPsxAddEECycles(psxScaleBlockCycles());
 	JMP32((uptr)iopDispatcherReg - ((uptr)x86Ptr + 5));
 	x86SetJ8(j8Ptr[0]);
 
@@ -1618,6 +1696,8 @@ static void iopRecRecompile(const u32 startpc)
 	u32 i;
 	u32 link_next_block = 0;
 
+	g_psxRefTiming = EmuConfig.Cpu.Recompiler.ReferenceTiming;
+
 	// When upgrading the IOP, there are two resets, the second of which is a 'fake' reset
 	// This second 'reset' involves UDNL calling SYSMEM and LOADCORE directly, resetting LOADCORE's modules
 	// This detects when SYSMEM is called and clears the modules then
@@ -1822,7 +1902,8 @@ StartRecomp:
 		else
 		{
 			xADD(ptr64[&psxRegs.cycle], psxScaleBlockCycles());
-			iPsxAddEECycles(psxScaleBlockCycles());
+			if (!g_psxRefTiming) // charged at the next branch instead
+				iPsxAddEECycles(psxScaleBlockCycles());
 		}
 
 		if (link_next_block || !psxbranch)

@@ -454,6 +454,7 @@ Pcsx2Config::RecompilerOptions::RecompilerOptions()
 	EnableVU1 = true;
 	EnableFastmem = true;
 	PauseOnTLBMiss = false;
+	ReferenceTiming = false;
 
 	// vu and fpu clamping default to standard overflow.
 	vu0Overflow = true;
@@ -531,6 +532,7 @@ void Pcsx2Config::RecompilerOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(EnableVU0);
 	SettingsWrapBitBool(EnableVU1);
 	SettingsWrapBitBool(EnableFastmem);
+	SettingsWrapBitBool(ReferenceTiming);
 	SettingsWrapBitBool(PauseOnTLBMiss);
 
 	SettingsWrapBitBool(vu0Overflow);
@@ -579,7 +581,8 @@ bool Pcsx2Config::CpuOptions::CpusChanged(const CpuOptions& right) const
 	return (Recompiler.EnableEE != right.Recompiler.EnableEE ||
 			Recompiler.EnableIOP != right.Recompiler.EnableIOP ||
 			Recompiler.EnableVU0 != right.Recompiler.EnableVU0 ||
-			Recompiler.EnableVU1 != right.Recompiler.EnableVU1);
+			Recompiler.EnableVU1 != right.Recompiler.EnableVU1 ||
+			Recompiler.ReferenceTiming != right.Recompiler.ReferenceTiming);
 }
 
 bool Pcsx2Config::CpuOptions::operator!=(const CpuOptions& right) const

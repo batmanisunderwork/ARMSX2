@@ -662,6 +662,11 @@ struct Pcsx2Config
 			EnableFastmem : 1;
 		bool
 			PauseOnTLBMiss : 1;
+		// The recompilers keep exactly the interpreter's timing (cycle counts,
+		// when timers and interrupts are checked), so x86-64 and ARM64 builds
+		// emulate identically. Slower; for cross-platform netplay.
+		bool
+			ReferenceTiming : 1;
 		BITFIELD_END
 
 		RecompilerOptions();
