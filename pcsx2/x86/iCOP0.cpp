@@ -140,6 +140,13 @@ void recMFC0()
 		xMOV(ptr64[&cpuRegs.cycle], rcx); // update cycles
 		xMOV(rax, rcx);
 		xSUB(rax, ptr[&cpuRegs.lastCOP0Cycle]);
+		if (g_eeRefTiming)
+		{
+			// Like the interpreter's MFC0: Count advances by at least 1 per read.
+			xMOV(edx, 1);
+			xTEST(rax, rax);
+			xCMOVE(rax, rdx);
+		}
 		xADD(ptr[&cpuRegs.CP0.n.Count], rax);
 		xMOV(ptr[&cpuRegs.lastCOP0Cycle], rcx);
 
