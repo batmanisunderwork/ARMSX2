@@ -931,9 +931,7 @@ REC_FUNC(SQC2);
 void recCOP2_BC2() { recCOP2_BC2t[_Rt_](); }
 void recCOP2_SPEC1()
 {
-	if (g_eeRefTiming)
-		mVURefSyncVU0(_vu0FinishMicro); // the interpreter's COP2_SPECIAL
-	else if (g_pCurInstInfo->info & (EEINST_COP2_SYNC_VU0 | EEINST_COP2_FINISH_VU0))
+	if (g_pCurInstInfo->info & (EEINST_COP2_SYNC_VU0 | EEINST_COP2_FINISH_VU0))
 		mVUFinishVU0();
 
 	recCOP2SPECIAL1t[_Funct_]();

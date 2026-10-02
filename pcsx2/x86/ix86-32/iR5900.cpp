@@ -1963,12 +1963,17 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	{
 		//If the COP0 DIE bit is disabled, cycles should be doubled.
 		s_nBlockCycles += g_eeRefTiming ? opcode.cycles : opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
-		if (g_eeRefTiming && _Opcode_ == 021 && (_Rs_ == 16 || _Rs_ == 20))
+		if (g_eeRefTiming && ((_Opcode_ == 021 && (_Rs_ == 16 || _Rs_ == 20)) || (_Opcode_ == 022 && _Rs_ >= 16)))
 		{
-			// ReferenceTiming: FPU arithmetic (S and W formats) runs through the
-			// interpreter, whose results are the cross-platform reference (the
-			// SSE recompiler's clamping can give different bits).
+			// ReferenceTiming: FPU arithmetic (S and W formats) and VU0 macro
+			// instructions (COP2 with the CO bit) run through the interpreter,
+			// whose results are the cross-platform reference (the SSE
+			// recompilers' clamping can give different bits, e.g. microVU keeps
+			// a NaN that the VU interpreter turns into -FLT_MAX). COP2 macro ops
+			// first finish VU0, which commits g_eeRefPending (VU0.cpp).
 			iFlushCall(FLUSH_INTERPRETER);
+			if (_Opcode_ == 022)
+				eeRefAccumulateBlockCycles(true);
 			xFastCall((void*)opcode.interpret);
 		}
 		else
